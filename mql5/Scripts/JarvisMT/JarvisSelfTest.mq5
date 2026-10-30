@@ -11,7 +11,8 @@
 //| number of positions and orders did not change.                   |
 //| get_broker and list_symbols are checked for argument bounds,     |
 //| paging, order, JSON escaping and caching; Market Watch must stay |
-//| unchanged.                                                       |
+//| unchanged. get_rates and get_calendar: argument bounds, bar order|
+//| and sanity, calendar order and fields.                           |
 //| Live-data replies (ping, account, positions, ...) are printed so |
 //| they can be compared with the terminal by eye.                   |
 //+------------------------------------------------------------------+
@@ -499,6 +500,84 @@ void TestCatalogLive()
          StringFormat("%d builds",g_jarvisCatBuilds-buildsBefore));
    Check(SymbolsTotal(true)==watchBefore,"catalog: Market Watch unchanged by list_symbols",
          StringFormat("before %d, after %d",watchBefore,SymbolsTotal(true)));
+  }
+
+//+------------------------------------------------------------------+
+//| get_rates and get_calendar: argument checks, then the live shape |
+//+------------------------------------------------------------------+
+void TestMarketData()
+  {
+   const string pre="{\"id\":\"";
+   const string sym="\"symbol\":\"EURUSD\"";
+   ExpectError("rates: missing symbol",pre+"m1\",\"cmd\":\"get_rates\",\"args\":{\"timeframe\":\"M15\"}}",-1,"m1","symbol");
+   ExpectError("rates: missing timeframe",pre+"m2\",\"cmd\":\"get_rates\",\"args\":{"+sym+"}}",-1,"m2","timeframe");
+   ExpectError("rates: lower-case timeframe",pre+"m3\",\"cmd\":\"get_rates\",\"args\":{"+sym+",\"timeframe\":\"m15\"}}",-1,"m3","timeframe");
+   ExpectError("rates: unknown timeframe",pre+"m4\",\"cmd\":\"get_rates\",\"args\":{"+sym+",\"timeframe\":\"W1\"}}",-1,"m4","timeframe");
+   ExpectError("rates: count 0",pre+"m5\",\"cmd\":\"get_rates\",\"args\":{"+sym+",\"timeframe\":\"M15\",\"count\":0}}",-1,"m5","count");
+   ExpectError("rates: count 1001",pre+"m6\",\"cmd\":\"get_rates\",\"args\":{"+sym+",\"timeframe\":\"M15\",\"count\":1001}}",-1,"m6","count");
+   ExpectError("rates: count as string",pre+"m7\",\"cmd\":\"get_rates\",\"args\":{"+sym+",\"timeframe\":\"M15\",\"count\":\"5\"}}",-1,"m7","count");
+   ExpectError("rates: unknown symbol",pre+"m8\",\"cmd\":\"get_rates\",\"args\":{\"symbol\":\"NOSUCHSYM\",\"timeframe\":\"M15\"}}",JARVIS_RC_UNKNOWN_SYMBOL,"m8");
+
+   ExpectError("calendar: missing from",pre+"m9\",\"cmd\":\"get_calendar\",\"args\":{\"to\":2000000000}}",-1,"m9","from");
+   ExpectError("calendar: to not after from",pre+"m10\",\"cmd\":\"get_calendar\",\"args\":{\"from\":2000000000,\"to\":2000000000}}",-1,"m10","after");
+   ExpectError("calendar: range over 14 days",pre+"m11\",\"cmd\":\"get_calendar\",\"args\":{\"from\":2000000000,\"to\":2001300000}}",-1,"m11","14 days");
+   ExpectError("calendar: two-letter currency",pre+"m12\",\"cmd\":\"get_calendar\",\"args\":{\"from\":2000000000,\"to\":2000086400,\"currencies\":[\"US\"]}}",-1,"m12","currencies");
+   ExpectError("calendar: currencies not an array",pre+"m13\",\"cmd\":\"get_calendar\",\"args\":{\"from\":2000000000,\"to\":2000086400,\"currencies\":\"USD\"}}",-1,"m13","currencies");
+   ExpectError("calendar: unknown importance",pre+"m14\",\"cmd\":\"get_calendar\",\"args\":{\"from\":2000000000,\"to\":2000086400,\"min_importance\":\"none\"}}",-1,"m14","min_importance");
+
+   string tmode="";
+   if(!Jarvis_TradeMode(tmode) || SymbolsTotal(true)<1)
+     {
+      Print("      market data: no account or no Market Watch symbol; live checks skipped");
+      return;
+     }
+   string watch=SymbolName(0,true);
+   CJson rep;
+   ExpectOk("rates: live 50 bars of M15",pre+"m20\",\"cmd\":\"get_rates\",\"args\":{\"symbol\":\""+watch+"\",\"timeframe\":\"M15\",\"count\":50}}",rep,false);
+   int d=rep.Get(rep.Root(),"data");
+   int bars=rep.Get(d,"bars");
+   int n=rep.Count(bars);
+   bool shape=n>=1 && n<=50 && rep.Str(rep.Get(d,"timeframe"))=="M15" && rep.Str(rep.Get(d,"symbol"))==watch;
+   bool ordered=true,sane=true;
+   long prev=0;
+   for(int i=0; i<n && shape; i++)
+     {
+      int b=rep.At(bars,i);
+      long t=rep.Int(rep.Get(b,"time"));
+      double o=rep.Num(rep.Get(b,"open")),h=rep.Num(rep.Get(b,"high")),l=rep.Num(rep.Get(b,"low")),c=rep.Num(rep.Get(b,"close"));
+      if(i>0 && t<=prev)
+         ordered=false;
+      prev=t;
+      if(h<MathMax(o,c) || l>MathMin(o,c) || l<=0.0 || !rep.IsWhole(rep.Get(b,"tick_volume")) || !rep.IsWhole(rep.Get(b,"spread")))
+         sane=false;
+     }
+   Check(shape,"rates: live reply has symbol, timeframe and at most 50 bars",StringFormat("n=%d",n));
+   Check(ordered,"rates: bars are oldest first");
+   Check(sane,"rates: high/low contain open/close, volume and spread are whole numbers");
+   ExpectOk("rates: live 1 bar of D1",pre+"m21\",\"cmd\":\"get_rates\",\"args\":{\"symbol\":\""+watch+"\",\"timeframe\":\"D1\",\"count\":1}}",rep,false);
+   Check(rep.Count(rep.Get(rep.Get(rep.Root(),"data"),"bars"))==1,"rates: count 1 gives the forming bar only");
+
+   long now=(long)TimeTradeServer();
+   ExpectOk("calendar: live, high importance, 24 h",
+            StringFormat("%sm22\",\"cmd\":\"get_calendar\",\"args\":{\"from\":%I64d,\"to\":%I64d,\"min_importance\":\"high\"}}",pre,now,now+86400),rep,true);
+   int events=rep.Get(rep.Get(rep.Root(),"data"),"events");
+   bool eventsOk=rep.Type(events)==JV_ARRAY;
+   bool sorted=true;
+   long last=0;
+   for(int i=0; i<rep.Count(events) && eventsOk; i++)
+     {
+      int e=rep.At(events,i);
+      long t=rep.Int(rep.Get(e,"time"));
+      if(t<last)
+         sorted=false;
+      last=t;
+      if(rep.Str(rep.Get(e,"importance"))!="high" || StringLen(rep.Str(rep.Get(e,"currency")))!=3 ||
+         rep.Str(rep.Get(e,"event"))=="" || rep.Get(e,"actual")<0 || rep.Get(e,"forecast")<0 ||
+         rep.Get(e,"previous")<0 || rep.Type(rep.Get(e,"unit"))!=JV_STRING)
+         eventsOk=false;
+     }
+   Check(eventsOk,"calendar: every event is high importance and carries all nine fields");
+   Check(sorted,"calendar: events are sorted by time");
   }
 
 void TestCatalog()
@@ -1050,6 +1129,7 @@ void OnStart()
    TestProtocol();
    TestLive();
    TestCatalog();
+   TestMarketData();
    TestWrites();
    PrintFormat("=== JarvisSelfTest done: %d passed, %d failed ===",g_pass,g_fail);
   }

@@ -18,6 +18,7 @@
 
 #include "Auth.mqh"
 #include "Json.mqh"
+#include "MarketData.mqh"
 #include "ReadHandlers.mqh"
 #include "SymbolCatalog.mqh"
 #include "TradeHandlers.mqh"
@@ -287,10 +288,16 @@ void Jarvis_Process(const string raw,JarvisResult &r,const bool checkFresh)
                            if(cmd=="list_symbols")
                               rc=Jarvis_CmdListSymbols(req,args,data,err);
                            else
-                             {
-                              Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
-                              return;
-                             }
+                              if(cmd=="get_rates")
+                                 rc=Jarvis_CmdGetRates(req,args,data,err);
+                              else
+                                 if(cmd=="get_calendar")
+                                    rc=Jarvis_CmdGetCalendar(req,args,data,err);
+                                 else
+                                   {
+                                    Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
+                                    return;
+                                   }
 
    if(rc!=0)
      {

@@ -6,6 +6,8 @@
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- price XAUUSD
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- history --days 7 --limit 50
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- symbol XAUUSD
+//! cargo run -p jarvis-bridge-client --example bridge_cli -- rates XAUUSD M15 --count 300
+//! cargo run -p jarvis-bridge-client --example bridge_cli -- calendar --hours 48 --currency USD EUR --importance high
 //! ```
 //!
 //! Write subcommands (`buy`, `sell`, `modify`, `close`, `cancel`) change the account. Each one
@@ -23,8 +25,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use jarvis_bridge_client::protocol::{
-    ExecType, HistoryQuery, JARVIS_MAGIC, OrderCancelArgs, OrderSendArgs, PositionCloseArgs,
-    PositionClosePartialArgs, PositionModifyArgs, Side, TradeMode,
+    CALENDAR_RANGE_MAX_SECS, CalendarQuery, ExecType, HistoryQuery, Importance, JARVIS_MAGIC,
+    OrderCancelArgs, OrderSendArgs, PositionCloseArgs, PositionClosePartialArgs,
+    PositionModifyArgs, RatesQuery, Side, Timeframe, TradeMode,
 };
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError, BridgeKey, auth};
 use serde::Serialize;
@@ -81,6 +84,27 @@ enum Cmd {
     Symbol { symbol: String },
     /// Which broker and server the terminal is logged into.
     Broker,
+    /// Price bars: prints the bar count and the first and last bar.
+    Rates {
+        symbol: String,
+        /// M1 M5 M15 M30 H1 H4 or D1.
+        timeframe: Timeframe,
+        /// 1 to 1000 (default 300).
+        #[arg(long)]
+        count: Option<u32>,
+    },
+    /// Economic calendar events from now (terminal server time) to --hours ahead.
+    Calendar {
+        /// How far ahead to look, 1 to 336 (default 24).
+        #[arg(long, default_value_t = 24)]
+        hours: u32,
+        /// Only these currencies, e.g. `--currency USD EUR`. Default: all.
+        #[arg(long = "currency", num_args = 1..)]
+        currencies: Vec<String>,
+        /// Lowest importance to show: low, moderate (default) or high.
+        #[arg(long)]
+        importance: Option<Importance>,
+    },
     /// The broker's whole symbol catalog (every page); --filter keeps names or descriptions
     /// containing the text (case-insensitive).
     Symbols {
@@ -232,6 +256,60 @@ async fn run(cli: Cli) -> Result<(), BridgeError> {
     match cli.command {
         Cmd::Symbol { symbol } => print(&client.get_symbol(&symbol).await?),
         Cmd::Broker => print(&client.get_broker().await?),
+        Cmd::Rates {
+            symbol,
+            timeframe,
+            count,
+        } => {
+            let rates = client
+                .get_rates(RatesQuery {
+                    symbol,
+                    timeframe,
+                    count,
+                })
+                .await?;
+            println!(
+                "{} {}: {} bars, {} digits",
+                rates.symbol,
+                rates.timeframe,
+                rates.bars.len(),
+                rates.digits
+            );
+            for (label, bar) in [("first", rates.bars.first()), ("last ", rates.bars.last())] {
+                match bar.map(serde_json::to_string) {
+                    Some(Ok(text)) => println!("{label} {text}"),
+                    Some(Err(e)) => {
+                        return Err(BridgeError::Protocol(format!("could not format bar: {e}")));
+                    }
+                    None => println!("{label} (no bars)"),
+                }
+            }
+            Ok(())
+        }
+        Cmd::Calendar {
+            hours,
+            currencies,
+            importance,
+        } => {
+            let max_hours = u32::try_from(CALENDAR_RANGE_MAX_SECS / 3600).unwrap_or(336);
+            if !(1..=max_hours).contains(&hours) {
+                return Err(BridgeError::Transport(format!(
+                    "--hours must be between 1 and {max_hours}"
+                )));
+            }
+            // MT5 times are server time, so anchor "now" on the terminal's clock.
+            let now = client.ping().await?.server_time;
+            print(
+                &client
+                    .get_calendar(CalendarQuery {
+                        from: now,
+                        to: now + i64::from(hours) * 3600,
+                        currencies,
+                        min_importance: importance,
+                    })
+                    .await?,
+            )
+        }
         Cmd::Symbols { filter, count } => {
             let all = client.list_all_symbols().await?;
             if count {

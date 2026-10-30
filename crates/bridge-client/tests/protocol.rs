@@ -476,3 +476,225 @@ fn write_requests_with_bad_arguments_are_rejected() {
         );
     }
 }
+
+// ---- market view: get_rates and get_calendar -------------------------------------------------
+
+mod market {
+    use jarvis_bridge_client::protocol::{
+        CALENDAR_RANGE_MAX_SECS, Calendar, CalendarQuery, Command, HISTORY_NOT_READY_RETCODES,
+        Importance, RATES_COUNT_DEFAULT, RATES_COUNT_MAX, Rates, RatesQuery, Reply, ReplyError,
+        Request, Timeframe,
+    };
+    use serde_json::json;
+
+    use super::{fixture, round_trip};
+
+    #[test]
+    fn rates_and_calendar_requests_round_trip() {
+        for (name, cmd) in [
+            ("get_rates.request.json", "get_rates"),
+            ("get_calendar.request.json", "get_calendar"),
+            ("get_calendar_minimal.request.json", "get_calendar"),
+        ] {
+            let request: Request = round_trip(name, &fixture(name));
+            assert_eq!(request.command.name(), cmd, "{name}");
+            assert!(!request.command.is_write(), "{name}: a read command");
+        }
+    }
+
+    #[test]
+    fn rates_request_carries_the_documented_arguments() {
+        let request: Request = serde_json::from_value(fixture("get_rates.request.json")).unwrap();
+        assert_eq!(
+            request.command,
+            Command::GetRates(RatesQuery {
+                symbol: "XAUUSD_".into(),
+                timeframe: Timeframe::M15,
+                count: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn rates_reply_round_trips_with_bars_oldest_first() {
+        let value = fixture("get_rates.reply.json");
+        let reply: Reply = round_trip("get_rates.reply.json", &value);
+        assert!(reply.ok);
+        let rates: Rates = round_trip("get_rates.reply.json data", &value["data"]);
+        assert_eq!(rates.timeframe, Timeframe::M15);
+        assert_eq!(rates.digits, 2);
+        assert_eq!(rates.bars.len(), 3);
+        assert!(rates.bars.windows(2).all(|w| w[0].time < w[1].time));
+        for bar in &rates.bars {
+            assert!(bar.high >= bar.open.max(bar.close), "{bar:?}");
+            assert!(bar.low <= bar.open.min(bar.close), "{bar:?}");
+        }
+    }
+
+    #[test]
+    fn calendar_reply_round_trips_with_null_values() {
+        let value = fixture("get_calendar.reply.json");
+        let _: Reply = round_trip("get_calendar.reply.json", &value);
+        let calendar: Calendar = round_trip("get_calendar.reply.json data", &value["data"]);
+        assert_eq!(calendar.events.len(), 4);
+        let released = &calendar.events[0];
+        assert_eq!(released.actual, Some(87.9));
+        let upcoming = &calendar.events[1];
+        assert_eq!((upcoming.actual, upcoming.unit.as_str()), (None, "K"));
+        let speech = &calendar.events[2];
+        assert_eq!(
+            (speech.actual, speech.forecast, speech.previous),
+            (None, None, None)
+        );
+        assert!(calendar.events.windows(2).all(|w| w[0].time <= w[1].time));
+    }
+
+    #[test]
+    fn calendar_nulls_are_sent_as_null_not_omitted() {
+        let calendar: Calendar =
+            serde_json::from_value(fixture("get_calendar.reply.json")["data"].clone()).unwrap();
+        let wire = serde_json::to_value(&calendar.events[2]).unwrap();
+        assert_eq!(wire["actual"], json!(null));
+        let object = wire.as_object().unwrap();
+        assert!(object.contains_key("forecast") && object.contains_key("previous"));
+    }
+
+    #[test]
+    fn history_not_ready_reply_is_a_remote_error_with_the_mt5_code() {
+        let value = fixture("get_rates_not_ready.reply.json");
+        let reply: Reply = round_trip("get_rates_not_ready.reply.json", &value);
+        match reply.decode::<Rates>() {
+            Err(ReplyError::Remote { retcode, .. }) => {
+                assert_eq!(retcode, 4401);
+                assert!(HISTORY_NOT_READY_RETCODES.contains(&retcode));
+            }
+            other => panic!("expected Remote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_arguments_are_left_out_of_the_request() {
+        let wire = |command: Command| {
+            serde_json::to_value(Request {
+                id: "i".into(),
+                ts: None,
+                command,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            wire(Command::GetRates(RatesQuery {
+                symbol: "EURUSD".into(),
+                timeframe: Timeframe::H4,
+                count: None,
+            })),
+            json!({"id": "i", "cmd": "get_rates", "args": {"symbol": "EURUSD", "timeframe": "H4"}})
+        );
+        assert_eq!(
+            wire(Command::GetCalendar(CalendarQuery {
+                from: 1,
+                to: 2,
+                currencies: vec![],
+                min_importance: None,
+            })),
+            json!({"id": "i", "cmd": "get_calendar", "args": {"from": 1, "to": 2}})
+        );
+    }
+
+    #[test]
+    fn timeframe_and_importance_use_the_documented_strings() {
+        for (tf, text) in [
+            (Timeframe::M1, "M1"),
+            (Timeframe::M5, "M5"),
+            (Timeframe::M15, "M15"),
+            (Timeframe::M30, "M30"),
+            (Timeframe::H1, "H1"),
+            (Timeframe::H4, "H4"),
+            (Timeframe::D1, "D1"),
+        ] {
+            assert_eq!(serde_json::to_value(tf).unwrap(), json!(text));
+            assert_eq!(
+                serde_json::from_value::<Timeframe>(json!(text)).unwrap(),
+                tf
+            );
+            assert_eq!(text.parse::<Timeframe>().unwrap(), tf);
+        }
+        // The wire is exact; only the command-line parser is case-insensitive.
+        for text in ["m15", "W1", "H2", ""] {
+            assert!(serde_json::from_value::<Timeframe>(json!(text)).is_err());
+        }
+        assert_eq!("h1".parse::<Timeframe>().unwrap(), Timeframe::H1);
+        assert!("W1".parse::<Timeframe>().is_err());
+
+        for (imp, text) in [
+            (Importance::Low, "low"),
+            (Importance::Moderate, "moderate"),
+            (Importance::High, "high"),
+        ] {
+            assert_eq!(serde_json::to_value(imp).unwrap(), json!(text));
+            assert_eq!(
+                serde_json::from_value::<Importance>(json!(text)).unwrap(),
+                imp
+            );
+        }
+        assert!(serde_json::from_value::<Importance>(json!("none")).is_err());
+        assert!(Importance::High >= Importance::Moderate);
+        assert!(Importance::Moderate > Importance::Low);
+        assert!(Importance::Low < Importance::High);
+    }
+
+    #[test]
+    fn limits_match_the_documented_contract() {
+        assert_eq!(RATES_COUNT_MAX, 1000);
+        assert_eq!(RATES_COUNT_DEFAULT, 300);
+        assert_eq!(CALENDAR_RANGE_MAX_SECS, 14 * 86_400);
+    }
+
+    #[test]
+    fn rates_query_validation() {
+        let query = |symbol: &str, count: Option<u32>| RatesQuery {
+            symbol: symbol.into(),
+            timeframe: Timeframe::M15,
+            count,
+        };
+        assert!(query("XAUUSD", None).validate().is_ok());
+        assert!(query("XAUUSD", Some(1)).validate().is_ok());
+        assert!(query("XAUUSD", Some(1000)).validate().is_ok());
+        let zero = query("XAUUSD", Some(0)).validate().unwrap_err();
+        assert!(zero.contains("between 1 and 1000"), "{zero}");
+        assert!(query("XAUUSD", Some(1001)).validate().is_err());
+        assert!(query("  ", None).validate().unwrap_err().contains("symbol"));
+    }
+
+    #[test]
+    fn calendar_query_validation() {
+        let query = |from: i64, to: i64, currencies: &[&str]| CalendarQuery {
+            from,
+            to,
+            currencies: currencies.iter().map(|c| (*c).to_owned()).collect(),
+            min_importance: None,
+        };
+        assert!(query(100, 101, &[]).validate().is_ok());
+        assert!(
+            query(0, CALENDAR_RANGE_MAX_SECS, &["USD", "eur"])
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            query(100, 100, &[])
+                .validate()
+                .unwrap_err()
+                .contains("after")
+        );
+        assert!(query(100, 50, &[]).validate().is_err());
+        assert!(
+            query(0, CALENDAR_RANGE_MAX_SECS + 1, &[])
+                .validate()
+                .unwrap_err()
+                .contains("14 days")
+        );
+        for bad in ["US", "USDX", "U5D", ""] {
+            assert!(query(0, 10, &[bad]).validate().is_err(), "{bad:?}");
+        }
+    }
+}

@@ -16,6 +16,8 @@
 //|   executed. Without a usable key file the EA does not start.     |
 //| - get_broker / list_symbols (0.4.0) read the broker's identity   |
 //|   and its full symbol catalog; they never change Market Watch.   |
+//| - get_rates / get_calendar (0.5.0) read price bars and the       |
+//|   built-in economic calendar. Read-only.                         |
 //| Wire format: crates/bridge-client/src/protocol.rs                |
 //|                                                                  |
 //| Requires "Allow DLL imports" for this EA (libzmq.dll).           |

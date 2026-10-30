@@ -2,11 +2,13 @@
 
 Wire contract between the Rust backend (`jarvis-bridge-client`) and the MQL5 EA `JarvisBridge`.
 Read commands (`ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `get_history`,
-`get_symbol`, `get_broker`, `list_symbols`) and write commands (`order_send`, `position_modify`,
+`get_symbol`, `get_broker`, `list_symbols`, `get_rates`, `get_calendar`) and write commands (`order_send`, `position_modify`,
 `position_close`, `position_close_partial`, `order_cancel`) are specified below. EA 0.3.x implements
 the first set of both (0.3.1 adds the `InpMaxLot` volume cap). **EA 0.4.0 adds `get_broker` and
 `list_symbols`** for per-broker symbol mapping. Both are new commands only: the protocol stays at
-version 2, and an older EA answers them with `retcode -2` (unknown command).
+version 2, and an older EA answers them with `retcode -2` (unknown command). **EA 0.5.0 adds
+`get_rates` and `get_calendar`** (price bars and MT5's economic calendar for the market view),
+again as new commands only.
 
 **Version 2 (EA 0.3.0) is not compatible with version 1.** Every message is now authenticated
 (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): it travels as two ZeroMQ
@@ -183,7 +185,8 @@ poll loop within a few milliseconds. It must never send an unsolicited message.
 
 ## Commands
 
-Read commands first, then `get_symbol`, `get_broker` and `list_symbols`, then the write commands.
+Read commands first, then `get_symbol`, `get_broker`, `list_symbols`, `get_rates` and
+`get_calendar`, then the write commands.
 
 ### `ping`
 
@@ -543,6 +546,119 @@ changing from one page to the next and starts again from offset 0;
 Errors: `-1` for a bad `offset` or `limit`. The EA answers `4001` if the terminal cannot produce
 the symbol list at all.
 
+### `get_rates`
+
+Args: `symbol` (string, required), `timeframe` (string, required: `M1`, `M5`, `M15`, `M30`, `H1`,
+`H4` or `D1`, upper case) and `count` (integer, optional, `1` to `1000`, default `300`; anything
+else is `-1`, the EA does not clamp). Price bars of one symbol, read with `CopyRates` from the
+current bar backwards. The EA selects the symbol into Market Watch like the other symbol
+commands (an unknown symbol is `4301`).
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1030", "cmd": "get_rates", "args": {"symbol": "XAUUSD_", "timeframe": "M15", "count": 3}}
+```
+
+```json
+{
+  "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1030",
+  "ok": true,
+  "data": {
+    "symbol": "XAUUSD_",
+    "timeframe": "M15",
+    "digits": 2,
+    "bars": [
+      {"time": 1793365200, "open": 3921.4, "high": 3924.85, "low": 3919.9, "close": 3923.1, "tick_volume": 812, "spread": 28},
+      {"time": 1793366100, "open": 3923.1, "high": 3926.3, "low": 3922.05, "close": 3925.6, "tick_volume": 947, "spread": 27},
+      {"time": 1793367000, "open": 3925.6, "high": 3927.0, "low": 3924.1, "close": 3925.09, "tick_volume": 311, "spread": 29}
+    ]
+  },
+  "retcode": 0
+}
+```
+
+| bar field | MT5 field | notes |
+|---|---|---|
+| `time` | `MqlRates.time` | bar **open** time, server time, Unix seconds |
+| `open`, `high`, `low`, `close` | same | printed with the symbol's `digits` |
+| `tick_volume` | `MqlRates.tick_volume` | ticks in the bar, not traded volume |
+| `spread` | `MqlRates.spread` | spread of the bar in points (the last value seen in the bar) |
+
+Bars are **oldest first**, and the **last bar is the current, still forming one** (its `high`,
+`low`, `close` and `tick_volume` still change). A client that works on closed bars drops it.
+Fewer bars than asked for is not an error: a young symbol, a short history on the server or the
+terminal's "max bars in chart" setting can all give less. A reply of 1000 bars is about 120 KB of
+JSON; the EA sends it whole.
+
+**History not loaded.** The first request for a symbol or timeframe the terminal has not used yet
+can find no bars: MT5 starts loading the history in the background and `CopyRates` returns -1 (or
+nothing). The EA then answers `ok: false` with the MT5 `GetLastError()` value as `retcode`, or
+`4401` when MT5 reports none. The codes that mean "not loaded yet, ask again" are `4401`
+(`ERR_HISTORY_NOT_FOUND`), `4403` (`ERR_HISTORY_TIMEOUT`), `4405` (`ERR_HISTORY_LOAD_ERRORS`)
+and `4806` (`ERR_INDICATOR_DATA_NOT_FOUND`, "requested data not found", what a series read
+reports while the data is being built). `BridgeClient::get_rates` waits 500 ms and asks once more
+when it sees one of them. The EA never waits for the download itself: a handler must not block.
+
+Errors: `-1` for a missing or ill-typed argument, an unknown `timeframe` or a `count` out of range;
+`4301` for an unknown symbol; the codes above while the history loads.
+
+### `get_calendar`
+
+Args: `from` and `to` (integers, required, server-time Unix seconds, `to` must be after `from` and
+at most **14 days** later), `currencies` (array of three-letter codes such as `["USD", "EUR"]`,
+optional; empty, `null` or missing means all currencies; case-insensitive; at most 16) and
+`min_importance` (`"low"`, `"moderate"` or `"high"`, optional, default `"moderate"`). Events
+come from MT5's **built-in economic calendar** (`CalendarValueHistory`); no external service is
+involved, but the terminal must be connected to the trade server.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1032", "cmd": "get_calendar", "args": {"from": 1793370000, "to": 1793456400, "currencies": ["USD", "EUR"], "min_importance": "moderate"}}
+```
+
+```json
+{
+  "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1032",
+  "ok": true,
+  "data": {
+    "events": [
+      {"time": 1793370600, "currency": "EUR", "country": "EU", "event": "German Ifo Business Climate",
+       "importance": "moderate", "actual": 87.9, "forecast": 87.5, "previous": 87.0, "unit": ""},
+      {"time": 1793376000, "currency": "USD", "country": "US", "event": "Nonfarm Payrolls",
+       "importance": "high", "actual": null, "forecast": 185.0, "previous": 175.0, "unit": "K"},
+      {"time": 1793386800, "currency": "USD", "country": "US", "event": "Fed Chair Speaks",
+       "importance": "high", "actual": null, "forecast": null, "previous": null, "unit": ""}
+    ]
+  },
+  "retcode": 0
+}
+```
+
+(Shortened; the fixture has four events.)
+
+| event field | source | notes |
+|---|---|---|
+| `time` | `MqlCalendarValue.time` | release time, **server time**, Unix seconds |
+| `currency` | `MqlCalendarCountry.currency` | e.g. `USD`; `EUR` for the euro area and for each member country |
+| `country` | `MqlCalendarCountry.code` | ISO 3166 alpha-2, e.g. `US`; `EU` for the euro area |
+| `event` | `MqlCalendarEvent.name` | in the terminal's language |
+| `importance` | `MqlCalendarEvent.importance` | `"low"` (MT5 "none" and "low"), `"moderate"`, `"high"` |
+| `actual`, `forecast`, `previous` | the value's `actual_value`, `forecast_value`, `prev_value` | numbers or `null` when MT5 has no value; an event that has not happened yet has no `actual`. `previous` is the *revised* previous value when MT5 has one |
+| `unit` | event unit and multiplier | display text such as `"%"`, `"K"`, `"M"`, `"$B"`, `"K jobs"`; empty when there is none. Values are already scaled: `185.0` with `"K"` is 185,000 |
+
+Events are **sorted by time**, and a reply holds at most **500** (the earliest ones are kept). The
+`importance` filter is applied before the cap. The raw MT5 values are integers scaled by 10^6; the
+EA converts them with `GetActualValue()` and friends (`null` where `Has*Value()` is false).
+
+**Time zone.** Both the request range and every event `time` are in **server time**, the same
+clock as bar times and `ping.server_time`, not UTC (unless the broker's server runs on UTC). To
+ask for "the next 24 hours", anchor on `ping.server_time`. A consumer that needs UTC must apply the
+server's UTC offset itself.
+
+Errors: `-1` for a missing or ill-typed argument, `to` not after `from`, a range over 14 days, a
+currency that is not three letters, or an unknown `min_importance`. An MT5 calendar failure
+(for example `5401`, `ERR_CALENDAR_TIMEOUT`, when the terminal cannot reach the calendar service)
+is returned as its `GetLastError()` value. A range without events is not an error: the reply has
+an empty `events` array.
+
 ## Write commands
 
 Write commands change the account. Only a user-confirmed, gate-approved request may produce them
@@ -809,6 +925,13 @@ Unknown command:
   reconnects once and re-sends within the same call. Nothing was delivered in that case, so
   this is safe even for write commands. A failure after the request was sent (including a
   timeout) is never retried; for a write the outcome is then unknown, see above.
+- **Market data** (`get_rates`, `get_calendar`). Both check their query before sending
+  anything and fail with `BridgeError::Remote { retcode: -1, .. }`, the same error the EA gives:
+  `count` outside `1..=1000`, an empty symbol, `to` not after `from`, a range over 14 days or a
+  currency that is not three letters. `get_rates` retries **once**, after 500 ms
+  (`RATES_RETRY_DELAY`), when the EA answers `4401`, `4403`, `4405` or `4806` (history not loaded
+  yet, see [`get_rates`](#get_rates)); the second answer is returned as it is. No other error and
+  no other command is retried. Both are plain reads, so they are safe to repeat.
 - **Reading the whole symbol catalog** (`list_all_symbols`). Loops `list_symbols` with
   `limit` 1000 from offset 0 until every symbol is read (about 13 requests for 12,224 symbols).
   If a page reports a different `total` than the first page of the pass, or is unexpectedly empty
@@ -884,6 +1007,21 @@ other traded instruments are visible, a plain `EURUSD` set is hidden, and dated 
 | `mock::default_catalog()` | the default catalog |
 | `mock::generated_catalog(n)` | a synthetic, name-ordered catalog of exactly `n` symbols (`SYM00000`...), e.g. 2,345 for a three-page read or 12,224 for a MetaQuotes-Demo sized one |
 
+`get_rates` and `get_calendar` serve synthetic data. Bars are a seeded random walk per (symbol,
+timeframe), built backwards from the current bid so the last close equals the quote; bar times are
+aligned to the timeframe and end at the bar the mock clock is in; one bar moves about 3 dollars
+for `XAUUSD`, a few pips for the FX pairs, scaled with the square root of the timeframe. The same
+clock gives the same bars on every run, and a short request is the tail of a longer one. The
+calendar is a canned list of USD, EUR, GBP and JPY events of mixed importance placed around the
+top of the current hour (two already released with an `actual`, the rest over the next 48 hours,
+some without forecast), filtered by range, currency and importance like the EA.
+
+| hook | effect |
+|---|---|
+| `MockState::clock` | the mock's "now" for bars and calendar (Unix seconds); `None` is the real time. Set it for results that do not move |
+| `history_not_ready(n)`, `MockState::history_not_ready` | the next `n` `get_rates` calls answer `4401`, to test the client's single retry |
+
 `MockState::symbols` holds realistic trading specifications for the six mock symbols.
-`bridge_cli` offers `broker`, `symbols [--filter text] [--count]`, `symbol`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`
+`bridge_cli` offers `broker`, `symbols [--filter text] [--count]`, `symbol`,
+`rates <symbol> <timeframe> [--count N]`, `calendar [--hours N] [--currency USD ...] [--importance high]`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`
 and refuses unless `ping` reports a demo account.

@@ -17,10 +17,13 @@ pub mod mock;
 #[cfg(feature = "mock")]
 mod mock_catalog;
 #[cfg(feature = "mock")]
+mod mock_market;
+#[cfg(feature = "mock")]
 mod mock_trade;
 
 pub use auth::BridgeKey;
 pub use client::{
     BridgeClient, BridgeConfig, DEFAULT_ENDPOINT, DEFAULT_TIMEOUT, MIN_WRITE_TIMEOUT,
+    RATES_RETRY_DELAY,
 };
 pub use error::BridgeError;

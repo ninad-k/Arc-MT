@@ -26,11 +26,17 @@ use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend};
 use crate::auth::{self, AuthFailure, BridgeKey};
 use crate::error::BridgeError;
 use crate::protocol::{
-    Account, BrokerInfo, CatalogSymbol, Command, History, HistoryQuery, LIST_SYMBOLS_LIMIT_MAX,
-    ListSymbolsQuery, OrderCancelArgs, OrderSendArgs, Orders, PROTOCOL_VERSION, PingInfo,
-    PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, Positions, Price,
-    RETCODE_AUTH_FAILED, Reply, Request, SymbolCatalogPage, SymbolInfo, TradeResult,
+    Account, BrokerInfo, Calendar, CalendarQuery, CatalogSymbol, Command,
+    HISTORY_NOT_READY_RETCODES, History, HistoryQuery, LIST_SYMBOLS_LIMIT_MAX, ListSymbolsQuery,
+    OrderCancelArgs, OrderSendArgs, Orders, PROTOCOL_VERSION, PingInfo, PositionCloseArgs,
+    PositionClosePartialArgs, PositionModifyArgs, Positions, Price, RETCODE_AUTH_FAILED,
+    RETCODE_INVALID_REQUEST, Rates, RatesQuery, Reply, Request, SymbolCatalogPage, SymbolInfo,
+    TradeResult,
 };
+
+/// Pause before the single retry of `get_rates` when the terminal has not loaded the history
+/// yet. Asking for the bars is what makes MT5 start loading them.
+pub const RATES_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Calls that may wait for the actor at the same time before `call` starts to back-pressure.
 const QUEUE_DEPTH: usize = 64;
@@ -287,6 +293,42 @@ impl BridgeClient {
         }
     }
 
+    /// Price bars, oldest first; the last bar is still forming. Fewer bars than asked for is
+    /// not an error.
+    ///
+    /// The query is checked before anything is sent (`Remote` with retcode `-1`, the same
+    /// error the EA would give). When the terminal has not loaded the history yet (retcode
+    /// 4401, 4403 or 4405, see [`HISTORY_NOT_READY_RETCODES`]) the call waits
+    /// [`RATES_RETRY_DELAY`] and asks once more; a second failure is returned as it is.
+    pub async fn get_rates(&self, query: RatesQuery) -> Result<Rates, BridgeError> {
+        query.validate().map_err(invalid_argument)?;
+        let first = self.call(Command::GetRates(query.clone())).await;
+        match first {
+            Err(BridgeError::Remote { retcode, .. })
+                if HISTORY_NOT_READY_RETCODES.contains(&retcode) =>
+            {
+                tracing::debug!(
+                    symbol = %query.symbol, timeframe = %query.timeframe, retcode,
+                    "history not loaded yet, retrying get_rates once"
+                );
+                tokio::time::sleep(RATES_RETRY_DELAY).await;
+                self.call(Command::GetRates(query)).await
+            }
+            other => other,
+        }
+    }
+
+    /// Economic calendar events (MT5's built-in calendar) in `[from, to]`, sorted by time.
+    /// The query is checked before anything is sent (range at most 14 days, `to` after `from`).
+    pub async fn get_calendar(&self, query: CalendarQuery) -> Result<Calendar, BridgeError> {
+        query.validate().map_err(invalid_argument)?;
+        let (from, to) = (query.from, query.to);
+        let mut calendar: Calendar = self.call(Command::GetCalendar(query)).await?;
+        // MT5 can return values from before `from`; filter here too, whatever the EA did.
+        calendar.events.retain(|e| e.time >= from && e.time <= to);
+        Ok(calendar)
+    }
+
     pub async fn get_symbol(&self, symbol: &str) -> Result<SymbolInfo, BridgeError> {
         self.call(Command::GetSymbol {
             symbol: symbol.to_owned(),
@@ -347,6 +389,14 @@ fn catalog_too_large() -> BridgeError {
     BridgeError::Protocol(format!(
         "the broker's symbol catalog is larger than {LIST_ALL_SYMBOLS_CAP} symbols"
     ))
+}
+
+/// A query rejected on the client side, shaped like the EA's own `-1` answer.
+fn invalid_argument(message: String) -> BridgeError {
+    BridgeError::Remote {
+        message,
+        retcode: RETCODE_INVALID_REQUEST,
+    }
 }
 
 fn actor_stopped() -> BridgeError {

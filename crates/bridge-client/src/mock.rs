@@ -25,6 +25,7 @@ use crate::auth::{self, AUTH_ERROR_TEXT, BridgeKey, ReplayGuard};
 use crate::client::BridgeConfig;
 use crate::error::BridgeError;
 pub use crate::mock_catalog::{default_catalog, generated_catalog};
+use crate::mock_market;
 use crate::mock_trade::Engine;
 use crate::protocol::{
     Account, BrokerInfo, CatalogSymbol, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT,
@@ -41,7 +42,7 @@ const RETCODE_UNKNOWN_SYMBOL: i64 = 4301;
 const LIST_SYMBOLS_LIMIT_DEFAULT: u32 = 500;
 
 /// Every command name the mock (and protocol version 1) knows.
-const KNOWN_COMMANDS: [&str; 14] = [
+const KNOWN_COMMANDS: [&str; 16] = [
     "ping",
     "get_price",
     "get_account",
@@ -51,6 +52,8 @@ const KNOWN_COMMANDS: [&str; 14] = [
     "get_symbol",
     "get_broker",
     "list_symbols",
+    "get_rates",
+    "get_calendar",
     "order_send",
     "position_modify",
     "position_close",
@@ -93,6 +96,13 @@ pub struct MockState {
     /// The broker's full symbol catalog served by `list_symbols`, in any order (the mock sorts
     /// by name, byte-wise, as the EA's list is ordered). Default: [`default_catalog`].
     pub catalog: Vec<CatalogSymbol>,
+    /// The clock of `get_rates` (the forming bar) and `get_calendar` (the canned events are
+    /// placed around it), Unix seconds. `None` (the default) is the real time; set it for
+    /// results that do not move between two calls.
+    pub clock: Option<i64>,
+    /// The next `n` `get_rates` calls answer `4401` (history not loaded yet) instead of bars,
+    /// to exercise the client's single retry.
+    pub history_not_ready: usize,
 }
 
 impl Default for MockState {
@@ -284,6 +294,8 @@ impl Default for MockState {
                 trade_mode: TradeMode::Demo,
             },
             catalog: default_catalog(),
+            clock: None,
+            history_not_ready: 0,
         }
     }
 }
@@ -539,6 +551,11 @@ impl MockBridge {
         inner.state.catalog = catalog;
     }
 
+    /// Make the next `n` `get_rates` calls answer `4401` (history not loaded yet).
+    pub fn history_not_ready(&self, n: usize) {
+        self.shared.lock().state.history_not_ready = n;
+    }
+
     /// Make every write answer `-3` (a real account without `InpAllowReal`) until switched off.
     pub fn refuse_writes(&self, refuse: bool) {
         self.shared.lock().state.refuse_writes = refuse;
@@ -656,7 +673,7 @@ pub(crate) fn err_reply(id: &str, retcode: i64, message: &str) -> Reply {
     }
 }
 
-fn unknown_symbol(id: &str, symbol: &str) -> Reply {
+pub(crate) fn unknown_symbol(id: &str, symbol: &str) -> Reply {
     err_reply(
         id,
         RETCODE_UNKNOWN_SYMBOL,
@@ -727,6 +744,8 @@ fn handle(
     match request.command {
         Command::GetBroker {} => ok_reply(id, &state.broker),
         Command::ListSymbols(query) => list_symbols(state, id, &query),
+        Command::GetRates(query) => mock_market::rates(state, id, &query),
+        Command::GetCalendar(query) => mock_market::calendar(state, id, &query),
         Command::GetSymbol { symbol } => match state.symbols.iter().find(|s| s.symbol == symbol) {
             Some(info) => ok_reply(id, info),
             None => unknown_symbol(id, &symbol),

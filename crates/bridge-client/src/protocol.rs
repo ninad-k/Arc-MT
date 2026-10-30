@@ -30,6 +30,15 @@ pub const HISTORY_LIMIT_MAX: u32 = 500;
 /// Default `get_history` limit when none is given.
 pub const HISTORY_LIMIT_DEFAULT: u32 = 100;
 
+/// Most bars `get_rates` may return in one reply.
+pub const RATES_COUNT_MAX: u32 = 1000;
+/// Default `get_rates` count when none is given.
+pub const RATES_COUNT_DEFAULT: u32 = 300;
+/// Longest time range `get_calendar` accepts, in seconds (14 days).
+pub const CALENDAR_RANGE_MAX_SECS: i64 = 14 * 24 * 3600;
+/// Most events one `get_calendar` reply carries (the EA keeps the earliest ones).
+pub const CALENDAR_EVENTS_MAX: usize = 500;
+
 /// A command plus its arguments. Serialises as `{"cmd": "...", "args": {...}}`.
 ///
 /// Sprint 1 contains read commands only. Write commands (`order_send`, ...)
@@ -61,6 +70,10 @@ pub enum Command {
     /// One page of the broker's FULL symbol catalog (all symbols the server offers,
     /// not only Market Watch), ordered by name.
     ListSymbols(ListSymbolsQuery),
+    /// Price bars (OHLC, tick volume, spread) of one symbol and timeframe, oldest first.
+    GetRates(RatesQuery),
+    /// Economic calendar events from MT5's built-in calendar.
+    GetCalendar(CalendarQuery),
 
     // ---- Write commands (Sprint 2). Only `gate`-approved, user-confirmed requests
     // ---- may produce these. The EA refuses them on real accounts unless its
@@ -86,6 +99,8 @@ impl Command {
             Command::GetSymbol { .. } => "get_symbol",
             Command::GetBroker {} => "get_broker",
             Command::ListSymbols(_) => "list_symbols",
+            Command::GetRates(_) => "get_rates",
+            Command::GetCalendar(_) => "get_calendar",
             Command::OrderSend(_) => "order_send",
             Command::PositionModify(_) => "position_modify",
             Command::PositionClose(_) => "position_close",
@@ -224,6 +239,232 @@ pub struct ListSymbolsQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
+
+/// Bar period of `get_rates`, serialised as its MT5 name (`"M15"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Timeframe {
+    M1,
+    M5,
+    M15,
+    M30,
+    H1,
+    H4,
+    D1,
+}
+
+impl Timeframe {
+    /// Every timeframe, shortest first.
+    pub const ALL: [Timeframe; 7] = [
+        Timeframe::M1,
+        Timeframe::M5,
+        Timeframe::M15,
+        Timeframe::M30,
+        Timeframe::H1,
+        Timeframe::H4,
+        Timeframe::D1,
+    ];
+
+    /// The wire name, e.g. `"M15"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Timeframe::M1 => "M1",
+            Timeframe::M5 => "M5",
+            Timeframe::M15 => "M15",
+            Timeframe::M30 => "M30",
+            Timeframe::H1 => "H1",
+            Timeframe::H4 => "H4",
+            Timeframe::D1 => "D1",
+        }
+    }
+
+    /// Length of one bar in seconds.
+    pub fn seconds(self) -> i64 {
+        match self {
+            Timeframe::M1 => 60,
+            Timeframe::M5 => 300,
+            Timeframe::M15 => 900,
+            Timeframe::M30 => 1800,
+            Timeframe::H1 => 3600,
+            Timeframe::H4 => 14_400,
+            Timeframe::D1 => 86_400,
+        }
+    }
+}
+
+impl std::fmt::Display for Timeframe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Timeframe {
+    type Err = String;
+
+    /// Case-insensitive: `"m15"` and `"M15"` both parse.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Timeframe::ALL
+            .into_iter()
+            .find(|t| t.as_str().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown timeframe {s:?} (use M1 M5 M15 M30 H1 H4 or D1)"))
+    }
+}
+
+/// `get_rates` arguments. `count` is 1..=[`RATES_COUNT_MAX`], default [`RATES_COUNT_DEFAULT`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RatesQuery {
+    pub symbol: String,
+    pub timeframe: Timeframe,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+impl RatesQuery {
+    /// The checks the EA makes, so a bad query fails without a round trip.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.symbol.trim().is_empty() {
+            return Err("get_rates: 'symbol' must not be empty".to_owned());
+        }
+        if let Some(count) = self.count
+            && !(1..=RATES_COUNT_MAX).contains(&count)
+        {
+            return Err(format!(
+                "get_rates: 'count' must be between 1 and {RATES_COUNT_MAX}, got {count}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One price bar. `time` is the bar open time in server time (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bar {
+    pub time: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub tick_volume: u64,
+    /// Spread of the bar in points.
+    pub spread: i64,
+}
+
+/// `get_rates` reply data: bars oldest first; the last one is still forming.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rates {
+    pub symbol: String,
+    pub timeframe: Timeframe,
+    pub digits: u32,
+    pub bars: Vec<Bar>,
+}
+
+/// Importance of a calendar event. Ordered, so `Importance::High >= Importance::Moderate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Importance {
+    Low,
+    Moderate,
+    High,
+}
+
+impl Importance {
+    /// The wire name, e.g. `"moderate"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Importance::Low => "low",
+            Importance::Moderate => "moderate",
+            Importance::High => "high",
+        }
+    }
+}
+
+impl std::fmt::Display for Importance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Importance {
+    type Err = String;
+
+    /// Case-insensitive.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Importance::Low, Importance::Moderate, Importance::High]
+            .into_iter()
+            .find(|i| i.as_str().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown importance {s:?} (use low, moderate or high)"))
+    }
+}
+
+/// `get_calendar` arguments. `from`/`to` are server-time Unix seconds. An empty `currencies`
+/// means all currencies; no `min_importance` means `moderate` (applied by the EA). Currency
+/// codes are case-insensitive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalendarQuery {
+    pub from: i64,
+    pub to: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub currencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_importance: Option<Importance>,
+}
+
+impl CalendarQuery {
+    /// The checks the EA makes, so a bad query fails without a round trip.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.to <= self.from {
+            return Err(format!(
+                "get_calendar: 'to' ({}) must be after 'from' ({})",
+                self.to, self.from
+            ));
+        }
+        if self.to - self.from > CALENDAR_RANGE_MAX_SECS {
+            return Err(format!(
+                "get_calendar: the range must be at most {} days",
+                CALENDAR_RANGE_MAX_SECS / 86_400
+            ));
+        }
+        for c in &self.currencies {
+            if c.len() != 3 || !c.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return Err(format!(
+                    "get_calendar: currency {c:?} must be a three-letter code such as USD"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One economic calendar event. `actual`, `forecast` and `previous` are `null` on the wire
+/// when MT5 has no value (an event that has not happened yet has no `actual`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    /// Release time, server time (Unix seconds).
+    pub time: i64,
+    /// Currency of the country the event belongs to, e.g. `"USD"`.
+    pub currency: String,
+    /// ISO 3166 alpha-2 country code, e.g. `"US"` (`"EU"` for the euro area).
+    pub country: String,
+    /// Event name in the terminal's language.
+    pub event: String,
+    pub importance: Importance,
+    pub actual: Option<f64>,
+    pub forecast: Option<f64>,
+    pub previous: Option<f64>,
+    /// Multiplier and unit of the values, e.g. `"%"`, `"K"`, `"M"`; empty when there is none.
+    pub unit: String,
+}
+
+/// `get_calendar` reply data: events sorted by time, at most [`CALENDAR_EVENTS_MAX`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Calendar {
+    pub events: Vec<CalendarEvent>,
+}
+
+/// MT5 errors that mean "the history is not (fully) loaded yet", not "the request is wrong":
+/// `ERR_HISTORY_NOT_FOUND` 4401, `ERR_HISTORY_TIMEOUT` 4403, `ERR_HISTORY_LOAD_ERRORS` 4405 and
+/// `ERR_INDICATOR_DATA_NOT_FOUND` 4806 (what a series read reports while the data is being
+/// built). The client retries `get_rates` once when the EA answers with one of them.
+pub const HISTORY_NOT_READY_RETCODES: [i64; 4] = [4401, 4403, 4405, 4806];
 
 /// How a symbol may be traded (`SYMBOL_TRADE_MODE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,7 +12,9 @@
 //! These tests only read. They never send trade commands.
 use std::time::Duration;
 
-use jarvis_bridge_client::protocol::{HistoryQuery, PROTOCOL_VERSION, TradeMode};
+use jarvis_bridge_client::protocol::{
+    CalendarQuery, HistoryQuery, PROTOCOL_VERSION, RatesQuery, Timeframe, TradeMode,
+};
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeKey, DEFAULT_ENDPOINT};
 
 /// The shared key from `JARVIS_BRIDGE_KEY` (hex) or the file named by `JARVIS_BRIDGE_KEY_FILE`.
@@ -137,4 +139,52 @@ async fn live_list_all_symbols_pages_through_the_whole_server_catalog() {
     );
     let visible = all.iter().filter(|s| s.visible).count();
     println!("{visible} visible in Market Watch");
+}
+
+#[tokio::test]
+#[ignore = "needs MT5 demo terminal with the JarvisBridge EA (0.5.0 or newer) running"]
+async fn live_get_rates_returns_well_formed_bars() {
+    let client = client();
+    let rates = client
+        .get_rates(RatesQuery {
+            symbol: symbol(),
+            timeframe: Timeframe::M15,
+            count: Some(300),
+        })
+        .await
+        .expect("get_rates");
+    assert!(!rates.bars.is_empty());
+    assert!(rates.bars.windows(2).all(|w| w[0].time < w[1].time));
+    for bar in &rates.bars {
+        assert!(bar.high >= bar.open.max(bar.close), "{bar:?}");
+        assert!(bar.low <= bar.open.min(bar.close), "{bar:?}");
+    }
+    println!(
+        "{} bars, first {:?}, last {:?}",
+        rates.bars.len(),
+        rates.bars.first(),
+        rates.bars.last()
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs MT5 demo terminal with the JarvisBridge EA (0.5.0 or newer) running"]
+async fn live_get_calendar_returns_sorted_events() {
+    let client = client();
+    let now = client.ping().await.expect("ping").server_time;
+    let calendar = client
+        .get_calendar(CalendarQuery {
+            from: now,
+            to: now + 48 * 3600,
+            currencies: Vec::new(),
+            min_importance: None,
+        })
+        .await
+        .expect("get_calendar");
+    assert!(calendar.events.windows(2).all(|w| w[0].time <= w[1].time));
+    println!(
+        "{} events; first: {:?}",
+        calendar.events.len(),
+        calendar.events.first()
+    );
 }
