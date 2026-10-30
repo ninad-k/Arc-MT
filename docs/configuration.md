@@ -54,7 +54,7 @@ Safety: keep `demo` for every test. Do not change `mode` to get past a `mode_mis
 | `dev_origins` | list of origins | `[]` | Browser origins (`"http://localhost:5173"`) allowed to call the API with the session cookie (CORS, and the WebSocket `Origin` check). Empty by default: the web UI is served by the API, and `pnpm -C web dev` goes through the Vite proxy, which is same-origin. Anything listed can drive the whole API, so list only origins you control. Entries are `scheme://host[:port]` with no path or wildcard. |
 | `header_read_timeout_secs` | integer 1 to 120 | `10` | How long a client has to send the headers of a request. It also closes a keep-alive connection that has been idle that long, and the TLS handshake has its own 10 s limit. A client that trickles its headers in cannot hold a connection open (finding NET-1). |
 | `request_timeout_secs` | integer 1 to 600 | `30` | How long a request may take to be answered, an upload of the body included. Applies to every route except the next row and the WebSocket (an open `/api/ws` has no limit; its upgrade is answered at once). A request that runs out gets `408 request_timeout`. |
-| `long_request_timeout_secs` | integer, `request_timeout_secs` to 3600 | `200` | The same for the routes that wait for a language model, the speech engines or a batch of trades: `/api/chat`, `/api/voice/*` and `/api/confirm/*`. A chat turn can make up to five model calls, so keep this above the `timeout_secs` of your slowest provider; the server logs a warning at startup when a provider is not shorter. A confirmed trade keeps running after its request is stopped. |
+| `long_request_timeout_secs` | integer, `request_timeout_secs` to 3600 | `200` | The same for the routes that wait for a language model, the speech engines, a batch of trades or a market view: `/api/chat`, `/api/voice/*`, `/api/confirm/*`, `/api/market/view` and `/api/market/news`. A chat turn can make up to five model calls, so keep this above the `timeout_secs` of your slowest provider; the server logs a warning at startup when a provider is not shorter. A confirmed trade keeps running after its request is stopped. |
 | `max_connections` | integer 1 to 100000 | `256` | Open connections accepted at once, counted before any TLS handshake. Another connection is closed at once, unanswered. Open WebSockets (at most 16) count as connections. |
 | `chat_rate_limit_per_minute` | integer 1 to 10000 | `20` | `POST /api/chat` requests per minute for one login session (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`, and the model is not called (finding NET-2). |
 | `transcribe_rate_limit_per_minute` | integer 1 to 10000 | `20` | The same for `POST /api/voice/transcribe`. |
@@ -141,6 +141,58 @@ US100 = "NAS100.cash"
   permanent changes in Settings or in `config/broker_symbols.toml`.
 
 The layers and their precedence are described in [symbol-mapping.md](symbol-mapping.md#the-three-layers).
+
+## `[market]`
+
+Market views: intraday analysis from the broker's bars, the MT5 economic calendar and optional news. How a view is computed is in [market-view.md](market-view.md). The whole section is optional: without it, views are on, with the values shown here and news off. An out-of-range value, an unknown key or a bad `provider` stops the server at startup and says which.
+
+```toml
+[market]
+enabled = true
+horizon_minutes = 240
+event_blackout_minutes = 30
+calendar_min_importance = "moderate"
+rate_limit_per_minute = 30
+
+[market.news]
+provider = "none"            # none | finnhub | alphavantage
+api_key_env = "FINNHUB_API_KEY"
+cache_minutes = 10
+```
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | `false` turns market views off: the `/api/market/*` routes answer `404 not_found`, the three market tools are not offered to the model, and the scoring task does not run. Prices, trading and everything else are unaffected. |
+| `horizon_minutes` | integer 15 to 1440 | `240` | How long a view is valid. After this the view is expired and cannot be used for Prepare trade. The track record scores a view at the end of this time. |
+| `event_blackout_minutes` | integer 0 to 240 | `30` | A view stands aside, with no setup, when a high-impact event for one of the instrument's currencies is this many minutes before or after now. |
+| `calendar_min_importance` | `"low"`, `"moderate"` or `"high"` | `"moderate"` | The lowest importance asked of the MT5 calendar. Events below it are not read. Stand aside uses `high` events, so `"high"` is enough for that rule. The same setting decides which events a view and the calendar list. |
+| `rate_limit_per_minute` | integer 1 to 10000 | `30` | The number of `GET /api/market/view` and `GET /api/market/news` requests one login session may make per minute (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`. |
+
+### `[market.view]` (advanced)
+
+The scoring weights, the bias threshold, the RSI bands and the sizing multipliers (stop 1.0, first target 1.5, second target 2.5 or a swing level, entry zone 0.5, all in ATRs) are the defaults of `ViewConfig` in `crates/market/src/config.rs`. They are listed in [market-view.md](market-view.md#how-the-score-works). An optional `[market.view]` table overrides any of them by the field names of that struct, for example `weight_h4_trend = 25.0`. Keys you leave out keep their defaults, and a value that is not a finite number stops the server at startup.
+
+```toml
+# [market.view]
+# weight_h4_trend = 25.0
+# bias_threshold = 20.0
+```
+
+Leave it out unless you know what you are changing. A changed model no longer matches the documentation, and the track record then scores a different model. `horizon_minutes` and `event_blackout_minutes` in `[market]` win over the same keys in `[market.view]`.
+
+The views need the EA at version 0.5.0 or newer (`get_rates` and `get_calendar`). With an older EA they fail with "unknown command". See [protocol.md](protocol.md#get_rates).
+
+### `[market.news]`
+
+News headlines are optional and off by default. A news key is a secret: it goes in `.env`, never in this file.
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `provider` | `"none"`, `"finnhub"` or `"alphavantage"` | `"none"` | The news source. `none` sends nothing out; the news section of a view says "not configured". |
+| `api_key_env` | env var name | the provider's usual variable | The name of the environment variable that holds the key, in the same way as `api_key_env` for a language model. When left out it is `FINNHUB_API_KEY` for `finnhub` and `ALPHAVANTAGE_API_KEY` for `alphavantage`. It must be a name (letters, digits and underscores): a pasted key is refused at startup. A missing or empty variable logs a warning at startup and runs as "not configured". |
+| `cache_minutes` | integer 1 to 240 | `10` | How long a result is reused per instrument before the provider is called again. Free plans are small, so raise it rather than lower it. |
+
+Where to get a free key, what the cache and the free-plan limits mean, and how tone is scored are in [market-view.md](market-view.md#news). The key is sent only to the provider's own servers over HTTPS, and never appears in logs. See [SECURITY.md](../SECURITY.md).
 
 ## `[llm]` and `[[llm.providers]]`
 
@@ -263,6 +315,8 @@ The persona then appears in the persona toggle and in Settings, and can be chose
 | `JARVIS_JWT_SECRET` | Yes, when `[auth] enabled = true` (the default), and for every `jarvis-api user` command | Signs session tokens and derives the key that encrypts TOTP secrets. At least 32 bytes, with at least 16 different byte values and no repeated block (a value that is Base64 or hex text is judged on the bytes it decodes to); the server refuses anything weaker. Generate a random value (see below). Changing it logs everyone out and makes stored TOTP secrets unreadable, so run `jarvis-api user reset-totp <name>` for each user afterwards. Never commit it. |
 | `JARVIS_BRIDGE_KEY` | Yes, unless `[bridge] key_file` is set | The shared bridge key as 64 hexadecimal characters. When set and not empty it wins over `key_file`; if it is set but not a valid key, the server stops instead of falling back to the file. Same secret as the content of `bridge.key`. Never commit it, and never paste it into an issue or a chat. |
 | The variable named by `api_key_env`, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | Only for that provider | The provider API key. Keep it in `.env` only. |
+| `FINNHUB_API_KEY` | Only with `[market.news] provider = "finnhub"` | Your Finnhub API key (the name is the default of `api_key_env`). Sent in a request header to Finnhub only. Keep it in `.env`; never commit it or paste it into an issue or a chat. |
+| `ALPHAVANTAGE_API_KEY` | Only with `[market.news] provider = "alphavantage"` (set `api_key_env = "ALPHAVANTAGE_API_KEY"`) | Your Alpha Vantage API key. Alpha Vantage only accepts it in the query string, so Arc MT never logs that request URL. Keep it in `.env`. |
 | `RUST_LOG` | No | Log filter (tracing `EnvFilter` syntax). Unset, the console default is `info,jarvis_api=debug,jarvis_bridge_client=debug`, and the Windows service default is `info,jarvis_api=debug,jarvis_bridge_client=info`. |
 | `JARVIS_CONFIG` | No | Path to the config file, used when `--config` is not given. |
 

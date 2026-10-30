@@ -175,10 +175,34 @@ To check or fix a mapping, open **Settings**, then **Symbols** (the section is t
 
 The details, including how the map is built and how to add a broker, are in [symbol-mapping.md](symbol-mapping.md).
 
+## Market views
+
+Ask for a view and Arc MT computes one from your broker's price bars, the MT5 economic calendar and, if you set up a news provider, recent headlines. You can type or say:
+
+| You say | What you get |
+|---|---|
+| "what's your view on gold for today?" | A bias (bullish, bearish or neutral), a confidence from 0 to 100, key levels and the main reasons |
+| "any buy setup on EURUSD?" | The same view for EURUSD, and the entry zone, stop loss and two targets if there is a buy setup |
+| "what news is out for the Nasdaq?" | The headline tone and up to 5 recent headlines (needs a news provider) |
+| "what's on the calendar today?" | The economic events of the next 24 hours |
+
+The web app has a **Market view** panel with the same card, a **Prepare trade** button and a **track record** of how earlier views turned out.
+
+Things to know:
+
+- **A view is information.** It never places an order or makes a preview by itself. **Prepare trade** asks for a volume, then gives you the normal preview, which goes through every limit and still needs your confirmation.
+- **It stands aside** near a high-impact event, or when the spread is too wide for the current volatility. It then gives the bias but no setup.
+- **It is not a prediction and not advice.** The numbers come from indicator rules. Nothing is guaranteed. A view expires after 4 hours.
+- It needs **EA 0.5.0**. With an older EA the app says the expert advisor is too old for market views; reinstall the EA.
+- News is off until you add a Finnhub or Alpha Vantage key to `.env`.
+
+How the score works, what each indicator means, the news setup and the troubleshooting table are in [market-view.md](market-view.md).
+
 ## Privacy
 
 - **Your MT5 login and password stay in MT5.** Arc MT never sends your login number, account name or server to the LLM or to the browser.
-- **API keys stay in `.env`**, not in the config file.
+- **API keys stay in `.env`**, not in the config file. A news key, if you add one, is sent only to its provider.
+- **With a news provider on, headline searches go to that provider** (Finnhub or Alpha Vantage) over HTTPS. The request names a news category or topic, a currency or a coin, not your account or positions. Without a provider nothing is sent.
 - **Where your data goes depends on the LLM provider.** Your messages and the answers from MT5 (prices, positions, deals) are sent to the provider you use. With a cloud provider (Anthropic or OpenAI), that data leaves your PC. With the default local provider (Ollama), it stays on your PC.
 - **The audit log is a local file**, `data/jarvis.db`. It records your messages and trade data, so keep it private.
 - **The API listens only on your PC** (`127.0.0.1`) in v0.1.0. Login is available from v0.2.0.

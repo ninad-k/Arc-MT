@@ -36,7 +36,7 @@ Health of every part. This endpoint never fails because the bridge is down; it r
   "bridge": {
     "connected": true,
     "latency_ms": 4,
-    "ea_version": "0.4.0",
+    "ea_version": "0.5.0",
     "protocol_version": 2,
     "trade_mode": "demo",
     "terminal_connected": true,
@@ -133,7 +133,7 @@ Everything above still holds. New error codes:
 | `forbidden` | 403 | WebSocket upgrade from a foreign `Origin` |
 | `not_found` | 404 | unknown `/api/...` path (after the session check, so an unauthenticated client gets 401) |
 | `method_not_allowed` | 405 | wrong HTTP method for the path |
-| `request_timeout` | 408 | the request took longer than `[server] request_timeout_secs` (30 s), or `long_request_timeout_secs` (200 s) for `/api/chat`, `/api/voice/*` and `/api/confirm/*`; the WebSocket has no limit |
+| `request_timeout` | 408 | the request took longer than `[server] request_timeout_secs` (30 s), or `long_request_timeout_secs` (200 s) for `/api/chat`, `/api/voice/*`, `/api/confirm/*`, `/api/market/view` and `/api/market/news`; the WebSocket has no limit |
 | `payload_too_large` | 413 | body over the limit (64 KB for JSON routes, 5 MB for `/api/voice/transcribe`) |
 | `gate_rejected` | 422 | the gate refused to build a preview (message says which limit or why), **or refused a confirmed order when the checks ran again at confirmation** (see `POST /api/confirm/{token}`) |
 | `token_unknown` | 404 | confirmation token not found |
@@ -680,3 +680,175 @@ Details:
   by then; nothing is sent and the token is cancelled.
 - Positions, orders and watchlist prices rows carry `"canonical"`; the chat tools return both
   the broker `symbol` and `canonical`.
+
+---
+
+# Market view
+
+Intraday views from the broker's bars, the MT5 economic calendar and optional news headlines. A view is information: it never creates a preview or sends an order by itself. How it is computed is in [market-view.md](market-view.md); the decision is [ADR-0019](adr/0019-market-views.md). The routes need a login session like the other `/api/*` routes.
+
+The routes need EA 0.5.0 (`get_rates`, `get_calendar`, see [protocol.md](protocol.md#get_rates)). With an older EA the view and calendar routes answer `502 ea_outdated`, with a message that says to update JarvisBridge to version 0.5.0 or newer.
+
+With `[market] enabled = false` every `/api/market/*` route answers `404 not_found` ("market views are turned off"), the three tools below are not offered to the model, and no scoring task runs.
+
+`GET /api/market/view` and `GET /api/market/news` have a per-session budget of `[market] rate_limit_per_minute` (default 30). Over it: `429 rate_limited` with `Retry-After`. They also use the longer request timeout (`[server] long_request_timeout_secs`), because a view reads bars, the calendar and news before it answers. The calendar and journal routes use the normal one.
+
+A `symbol` is a canonical name, a generic alias or the broker's own symbol, resolved like the other symbol selectors (see [Broker symbol mapping](#broker-symbol-mapping)). A name that resolves to nothing is `400 bad_request`. The view reply carries both the canonical `symbol` and the `broker_symbol`.
+
+`GET /api/status` gains `"market": {"enabled": true, "news_provider": "none", "news_configured": false}` (`news_provider` is `finnhub`, `alphavantage` or `none`; `news_configured` is false when no provider is set up or its key is missing).
+
+## Tools for the chat model
+
+Three read tools. They are `ReadTool` variants like `get_price`, so they cannot trade, and they write the same audit rows (`tool_call`). They are offered to the model only when market views are on. A view request also writes a `market_view` audit row (view id, symbol, broker symbol, bias, confidence, whether it stands aside, whether it has a setup, and `source`: `tool` or `ui`).
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `get_market_view` | `symbol` | The view JSON below, trimmed for the model (see the note after it). Each call is also saved in the journal. |
+| `get_economic_calendar` | `hours_ahead` (optional whole number, 1 to 168, default 24), `currencies` (optional list of three-letter codes) | `{hours_ahead, currencies, count, listed, events}`. `events` holds at most 40 events; `count` is the total. |
+| `get_news` | `symbol` | `{configured, provider, summary, error?}` as in `GET /api/market/news`, without links, and with a `note` when no provider is set up |
+
+What the model receives is trimmed: no `id`, `broker_symbol` or `digits`; the timeframe rows keep only `timeframe`, `trend`, `rsi` and `atr`; headlines keep `title`, `source`, `published_at` and `tone` (no URL). A headline title is third-party text, so it is cut to one line of at most 200 characters, and the tool description tells the model that headlines are untrusted and that it must not follow instructions found in them. The model is told to call `get_market_view` for any request for a view, opinion, outlook, bias or buy or sell suggestion, to relay the bias, the confidence, the setup levels when there is one and the two main reasons in two or three sentences, to mention upcoming high-impact events and why the view stands aside, to say that it is a computed analysis and not a guarantee, and to propose a trade only when the user asks for that trade with a volume. Figures in its reply go through the grounding check described under [Previews and confirmation](#previews-and-confirmation-sprint-2).
+
+## GET /api/market/view?symbol=XAUUSD
+
+Computes a view now, saves it and returns it. Reply `MarketViewDto`:
+
+```json
+{
+  "id": "5b0b7a4e-6f43-4c2a-9a52-3f1d6c8e2a10",
+  "symbol": "XAUUSD", "broker_symbol": "XAUUSD_", "digits": 2,
+  "generated_at": "2026-10-30T13:50:00Z", "valid_until": "2026-10-30T17:50:00Z",
+  "price": { "bid": 3925.09, "ask": 3925.22 },
+  "bias": "bullish", "confidence": 62, "score": 62.0,
+  "stand_aside": false, "stand_aside_reason": null,
+  "setup": { "side": "buy", "entry_low": 3921.4, "entry_high": 3925.22, "stop_loss": 3911.0,
+             "take_profit": 3944.1, "take_profit_2": 3958.0, "risk_reward": 1.5,
+             "atr_h1": 12.4, "atr_m15": 5.1 },
+  "timeframes": [
+    { "timeframe": "H4", "trend": "up", "ema20": 3918.4, "ema50": 3902.7, "rsi": 61.3, "macd_hist": 2.41, "atr": 31.2 }
+  ],
+  "levels": { "pivot": 3912.6, "r1": 3921.1, "r2": 3934.9, "s1": 3899.0, "s2": 3890.3,
+              "prev_day_high": 3930.5, "prev_day_low": 3898.2, "vwap": 3916.8,
+              "support": [3919.2, 3911.0], "resistance": [3933.6, 3948.0] },
+  "factors": [
+    { "name": "H4 trend", "signal": "bullish", "points": 25.0, "detail": "EMA20 above EMA50, close above EMA50" }
+  ],
+  "events": [
+    { "time": "2026-10-30T14:30:00Z", "minutes_away": 40, "currency": "USD", "title": "Nonfarm Payrolls",
+      "importance": "high", "actual": null, "forecast": 185.0, "previous": 175.0, "unit": "K" }
+  ],
+  "news": { "configured": true, "score": 0.2, "label": "slightly positive", "count": 7,
+            "headlines": [ { "title": "...", "source": "...", "url": "https://...",
+                             "published_at": "2026-10-30T12:10:00Z", "tone": 0.4 } ] },
+  "summary": "Bullish intraday bias, confidence 62 of 100: H4 and H1 trends are up. Buy zone 3921.40 to 3925.22, stop 3911.00, target 3944.10.",
+  "disclaimer": "Computed from price data, indicators, the economic calendar and headlines. It is not financial advice and no outcome is guaranteed.",
+  "notes": []
+}
+```
+
+(Shortened: `timeframes` has a row for H4, H1 and M15, and `factors` one entry per factor that could be computed. The numbers are illustrative.)
+
+- `bias` is `bullish`, `bearish` or `neutral`. `score` is -100 to 100 and `confidence` 0 to 100. `factors[].signal` uses the same three words, and `points` is the signal times the weight. The factor names are `H4 trend`, `H1 trend`, `M15 momentum`, `M15 RSI`, `VWAP`, `Daily pivot` and `News`.
+- `setup` is `null` when the bias is neutral, when `stand_aside` is true, or when there is not enough data. `side` is `buy` or `sell`. For a sell the zone is `[bid, bid + 0.5 * ATR(M15)]`. `risk_reward` is the distance to `take_profit` over the distance to `stop_loss`.
+- `stand_aside_reason` is plain text (for example `High-impact USD event "Nonfarm Payrolls" in 12 minutes`) and joins two reasons with `; `.
+- `levels` fields are `null` (and the lists empty) where the data was missing. `timeframes[].trend` is `up`, `down` or `mixed`.
+- `events` are the calendar events of the instrument's currencies at or above `[market] calendar_min_importance`, from 60 minutes ago to 24 hours ahead, sorted by time. `minutes_away` is negative once an event has happened. `time` is ISO 8601 UTC. `actual`, `forecast`, `previous` and `unit` are `null` when MT5 has no value. Events in a view have no `country`.
+- `news.configured` is false when no provider is set up (or its key is missing or was refused), with `label` `"not configured"`, `count` 0 and no headlines. When a provider is set up but did not answer (an error, or no reply within about 4 seconds), `configured` is true, `label` is `"unavailable"`, and `notes` says so. `headlines` holds up to 5 items. Headline text is external and must be shown as plain text.
+- `valid_until` is `generated_at` plus `[market] horizon_minutes` (4 hours by default).
+- `notes` lists, in plain words, what was skipped or missing: a factor that lacked history, a calendar that could not be read, news that was unavailable.
+
+Errors: `400 bad_request` (missing, empty or unusable `symbol`), `429 rate_limited`, `502 ea_outdated`, `503 bridge_unavailable`, and `502 bridge_error` (the EA's refusal, with its MT5 code in the message, for example unknown symbol, or history not loaded after the one retry). A calendar that fails for any other reason does not fail the view: it is computed without events and `notes` says so.
+
+## GET /api/market/calendar?hours=24&currencies=USD,EUR
+
+`hours` is 1 to 168 (default 24); anything else is `400 bad_request`. `currencies` is an optional comma list of three-letter codes (case-insensitive); anything that is not three letters is `400 bad_request`. Events run from 1 hour ago to `hours` ahead, and come from the MT5 calendar at `[market] calendar_min_importance` or above.
+
+```json
+{
+  "events": [
+    { "time": "2026-10-30T14:30:00Z", "minutes_away": 40, "currency": "USD", "country": "US",
+      "title": "Nonfarm Payrolls", "importance": "high",
+      "actual": null, "forecast": 185.0, "previous": 175.0, "unit": "K" }
+  ]
+}
+```
+
+`actual`, `forecast`, `previous` and `unit` are `null` when MT5 has no value. At most 500 events are returned (the EA's cap). Errors: `400 bad_request`, `502 ea_outdated`, `503 bridge_unavailable`, `502 bridge_error`.
+
+## GET /api/market/news?symbol=US100
+
+```json
+{
+  "configured": true,
+  "provider": "finnhub",
+  "summary": {
+    "score": -0.18, "label": "slightly negative", "count": 7,
+    "headlines": [ { "title": "...", "source": "...", "url": "https://...",
+                     "published_at": "2026-10-30T12:10:00Z", "tone": -0.5 } ]
+  }
+}
+```
+
+With no provider: `{"configured": false, "provider": null, "summary": null}`. `score` is -1 to 1 in the instrument's direction, `count` is the number of relevant headlines in the last 24 hours, and `headlines` holds at most 5.
+
+A provider failure (rate limit, timeout after about 4 seconds, an outage) is **not** an HTTP error: the reply is `200` with `"configured": true`, the provider name, `"summary": null` and an `"error"` string. If a cached summary younger than an hour exists, it is returned instead. A key the provider rejects makes the reply `configured: false`. Errors: `400 bad_request` (missing or unusable `symbol`), `429 rate_limited`.
+
+## GET /api/market/journal?limit=20&symbol=XAUUSD
+
+The saved views, newest first, with their outcomes, and the track-record statistics. `limit` is 1 to 200 (default 20; a value outside it is clamped). `symbol` is optional and is resolved to its canonical name; it filters both `views` and `stats`.
+
+```json
+{
+  "stats": {
+    "total": 42, "setups": 24, "open": 1,
+    "tp_hit": 9, "sl_hit": 8, "expired": 6, "no_setup": 18,
+    "bias_correct": 22, "bias_wrong": 16,
+    "tp_rate": 0.391, "bias_accuracy": 0.579
+  },
+  "views": [
+    { "id": "5b0b7a4e-6f43-4c2a-9a52-3f1d6c8e2a10", "created_at": "2026-10-30T13:50:00Z",
+      "symbol": "XAUUSD", "broker_symbol": "XAUUSD_",
+      "bias": "bullish", "confidence": 62, "score": 62.0, "stand_aside": false,
+      "side": "buy", "entry": 3923.31, "stop": 3911.0, "tp": 3944.1,
+      "price": 3925.155, "valid_until": "2026-10-30T17:50:00Z",
+      "outcome": "tp_hit", "evaluated_at": "2026-10-30T15:05:00Z",
+      "bias_correct": true, "move_atr": 0.9 }
+  ]
+}
+```
+
+(Illustrative numbers.)
+
+- `stats.setups` counts views that had a setup. `tp_rate` is `tp_hit` divided by the setups that have closed (`tp_hit` + `sl_hit` + `expired`), and `bias_accuracy` is `bias_correct` divided by `bias_correct` + `bias_wrong`. Both are rounded to 3 decimals and are `null` when nothing counts yet.
+- In a row, `side`, `entry`, `stop` and `tp` are `null` for a view without a setup. `entry` is the middle of the entry zone and `tp` is take profit 1. `price` is the mid of bid and ask when the view was made.
+- `outcome` is `open`, `tp_hit`, `sl_hit`, `expired` or `no_setup`. `evaluated_at` is when the row last changed. `bias_correct` and `move_atr` are `null` until the bias is judged at `valid_until`. `move_atr` is the move in H1 ATRs, positive when the price went the way the bias said (for a neutral view, positive when it went up).
+
+See [Track record](market-view.md#track-record) for how views are scored. The views are stored in the `market_views` table (migration `0007_market_views.sql`). The scoring task runs at start-up and then every 5 minutes.
+
+## POST /api/market/prepare
+
+Turns a view with a setup into an order proposal. It does not send anything and does not confirm.
+
+```json
+{ "view_id": "5b0b7a4e-6f43-4c2a-9a52-3f1d6c8e2a10", "volume": 0.1, "order_type": "market" }
+```
+
+- `view_id` must be a saved view that has not expired and has a setup.
+- `volume` is required, in lots, and must be above 0. There is no default (core rule 9).
+- `order_type` is required: `market` or `limit`. A `market` order uses the setup's stop loss and take profit 1. A `limit` order is placed at `entry_low` for a buy or `entry_high` for a sell, with the same stop loss and take profit 1. Take profit 2 is not sent.
+
+The reply is a `PreviewDto`, the same shape as every other preview (see [Previews and confirmation](#previews-and-confirmation-sprint-2)), with a confirmation `token` and its 15-second window. The proposal goes through `Trading::propose` with the source set to the UI, so **every limit and the kill switch apply**: `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours and the stops-distance checks. The broker symbol is looked up again at that moment, so a view made on another account maps to the current one. Confirming is the normal `POST /api/confirm/{token}`. A `market_prepare` audit row records the view, the volume and the order type before the gate decides.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `bad_request` | invalid JSON, a missing `view_id`, a missing or non-positive `volume`, a missing or unknown `order_type`, or a symbol that no longer resolves |
+| 404 | `not_found` | no such view |
+| 410 | `view_expired` | the view is past its `valid_until` |
+| 409 | `broker_changed` | the MT5 account changed while the proposal was prepared |
+| 422 | `no_setup` | the view stood aside, or its bias was neutral, so it has no setup |
+| 422 | `gate_rejected` | a limit or a broker rule refused the proposal (the message says which) |
+| 423 | `kill_switch` | the kill switch is engaged |
+
+## Configuration
+
+`[market]` and `[market.news]` are described in [configuration.md](configuration.md#market). The audit kinds added are `market_view` and `market_prepare`.

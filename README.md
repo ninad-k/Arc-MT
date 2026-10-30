@@ -37,8 +37,9 @@ The bridge to MT5 listens on loopback only, and remote access requires HTTPS and
 Marked **(local)** when the feature runs entirely on your PC, with no cloud service involved.
 
 - **Market data and account (local):** bid and ask prices, account summary, open positions, pending orders and closed deals with totals
-- **Broker symbol mapping (local):** you say "gold" or "nasdaq" and Arc MT uses your broker's own symbol names. The map is detected from the broker's full symbol list when you connect, and again when you switch broker in MT5. You can review and override it in Settings. See [docs/symbol-mapping.md](docs/symbol-mapping.md).
   that the backend computes. Totals are never estimated by the model.
+- **Broker symbol mapping (local):** you say "gold" or "nasdaq" and Arc MT uses your broker's own symbol names. The map is detected from the broker's full symbol list when you connect, and again when you switch broker in MT5. You can review and override it in Settings. See [docs/symbol-mapping.md](docs/symbol-mapping.md).
+- **Market views (local; news is optional):** ask "what's your view on gold for today?" and get a bias, a confidence, key levels and, when the conditions allow, an entry zone with a stop and two targets. The analysis is computed in code from your broker's own bars, the MT5 economic calendar and, if you add a Finnhub or Alpha Vantage key, headline tone. The model only reads the result back. A view is information and never places or proposes a trade by itself: **Prepare trade** asks for a volume and goes through every limit and the normal confirmation. Views are saved and scored, so you can see how they turned out. Not financial advice; demo first. See [docs/market-view.md](docs/market-view.md) and [ADR-0019](docs/adr/0019-market-views.md).
 - **Chat (Ollama is local; Anthropic and OpenAI are cloud):** typed questions in English and Hinglish, with tool calls shown in the transcript.
 - **Personas (local):** two built-in personas. **Jarvis** has a male British voice and speaks calmly and formally. **Friday** has a female US voice and is warm and casual.
   Switch with the persona toggle, or say "Hey Jarvis" or "Hey Friday" in hands-free mode. A persona changes the name, the wording, the voice, the wake phrase and the colours. Tools, limits, confirmations and safety rules are the same for both. See [ADR-0017](docs/adr/0017-personas.md) and the [user guide](docs/user-guide.md#personas-available-from-v020).
@@ -133,7 +134,7 @@ Then attach the EA to a chart: **Navigator > Expert Advisors > JarvisMT > Jarvis
 **Allow Algo Trading**. Keep the global option under Tools > Options > Expert Advisors off. The **Algo Trading** button on the toolbar must be on,
 because writes are refused while it is off.
 
-The Experts tab should show a line that starts with `JarvisBridge 0.4.0 listening on 127.0.0.1:5555`.
+The Experts tab should show a line that starts with `JarvisBridge 0.5.0 listening on 127.0.0.1:5555`.
 
 Check the bridge from the repository root:
 
@@ -267,6 +268,8 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | `personas/` | Persona packs, one TOML file each: `jarvis.toml` and `friday.toml` |
 | `crates/voice` | `jarvis-voice`: Whisper speech-to-text (feature `whisper`) and Piper text-to-speech |
 | `crates/bridge-client` | `jarvis-bridge-client`: wire types, ZeroMQ client, mock bridge, `bridge_cli` and `mock_server` examples |
+| `crates/market` | `jarvis-market`: indicators and the market view scoring (pure functions, no I/O) |
+| `crates/news` | `jarvis-news`: Finnhub and Alpha Vantage news providers, headline relevance, tone and cache |
 | `mql5/` | `JarvisBridge` EA, protocol headers, vendored mql-zmq and a libzmq 4.3.5 DLL built from source by `scripts/build-libzmq.ps1` ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
 | `web/` | SvelteKit web app: the HUD, login, audit page, PWA |
 | `apps/desktop/` | Tauri 2 desktop shell |
@@ -286,6 +289,7 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | [docs/runbook.md](docs/runbook.md) | Operators: start and stop, health, logs, audit queries, users, kill switch, recovery, backups |
 | [docs/configuration.md](docs/configuration.md) | Every setting in `jarvis.toml` and every environment variable |
 | [docs/symbol-mapping.md](docs/symbol-mapping.md) | Broker symbol names: canonical names, per-broker maps, detection on account switch, overrides and adding a broker |
+| [docs/market-view.md](docs/market-view.md) | Market views: what they are, the scoring model, indicators, optional news providers, Prepare trade, the track record, limits and troubleshooting |
 | [docs/windows-service.md](docs/windows-service.md) | Installing and running the Windows service |
 | [docs/vps.md](docs/vps.md) | Running on a Windows VPS: sizing, hardening, TLS, monitoring, LIVE |
 | [docs/api.md](docs/api.md) | HTTP and WebSocket contract |

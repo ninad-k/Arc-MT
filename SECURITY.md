@@ -51,7 +51,7 @@ In scope:
 - **Kill switch bypass.** A write that succeeds while the kill switch is on.
 - **LLM-driven execution.** Any tool, prompt or input that lets the model (or text it is shown) cause a trade without the user's confirmation.
 - **Authentication and sessions.** Login, TOTP, session cookies and JWT handling, rate limiting, access control on any HTTP or WebSocket route.
-- **Token and secret handling.** Leaks of API keys, the JWT secret, confirmation tokens, or session cookies, for example into logs, error messages or the browser.
+- **Token and secret handling.** Leaks of API keys (language model and news provider keys), the JWT secret, confirmation tokens, or session cookies, for example into logs, error messages or the browser.
 - **Bridge exposure.** The ZeroMQ bridge or the API being reachable from outside the machine, or accepting commands from an unintended peer.
 - **Credential leakage.** Account login, name or server reaching the LLM, the browser, logs or the audit log.
 - **Demo/real mismatch.** Running in demo mode against a real account without being stopped.
@@ -62,10 +62,11 @@ Out of scope:
 - Bugs or outages in MetaTrader 5, your broker, or your VPS provider.
 - Losses caused by settings the user chose, such as generous limits, a real account, or a confirmation the user gave.
 - Mistakes by a language model that never reach the confirmation step (a wrong answer is not a vulnerability; a wrong trade without confirmation is).
+- A market view that turns out wrong. Views come from indicator rules and are not predictions. A view, a news headline or a calendar entry that makes a trade happen without confirmation is in scope.
 - Attacks that need an already compromised machine, a stolen unlocked device, or administrator access to the PC that runs Arc MT.
 - Denial of service by a client that already holds a valid session.
 - Findings from automated scanners without a demonstrated impact, and missing security headers on a loopback-only deployment.
-- Issues in third-party services (Anthropic, OpenAI, Ollama) or in the vendored mql-zmq and libzmq libraries that are not specific to how Arc MT uses them. Please report those upstream.
+- Issues in third-party services (Anthropic, OpenAI, Ollama, Finnhub, Alpha Vantage) or in the vendored mql-zmq and libzmq libraries that are not specific to how Arc MT uses them. Please report those upstream.
 
 ## Safe harbour
 
@@ -82,6 +83,8 @@ The design goal is that a trade cannot happen unless the user explicitly confirm
 
 - **The model cannot trade.** It can call read tools and `propose_*` tools. A proposal produces a preview and a one-time token; it never sends an order.
 - **Confirmation gate.** Only a confirm request carrying a valid token (a button press or a spoken "confirm") sends a write command. Tokens last 15 seconds and work once. Batch actions need a second confirmation that repeats the count.
+- **Market views cannot trade.** A view is computed in code from broker bars, the MT5 calendar and optional headlines, and it is read through read tools. It never creates a preview. "Prepare trade" needs an explicit volume, goes through every limit and the kill switch, and ends in the normal one-time confirmation.
+- **News keys and headlines.** The optional news providers (Finnhub, Alpha Vantage) need an API key. It is kept in `.env`, never in the config file or the repository, and sent only to the provider over HTTPS (plain `http` is refused except to loopback in tests). The Finnhub key goes in a request header. Alpha Vantage requires it in the query string, so its request URLs are never logged, transport errors are stripped of the URL, and any text that could echo the key is redacted before it reaches an error or a log. With no provider configured nothing is sent. Headlines are untrusted external text: the web app shows them as plain text (never as HTML), links open with `rel="noopener noreferrer"`, and the model receives them as tool data. A headline that tries to give the model instructions cannot place an order, because the model has no write tool and every trade needs a preview and a confirmation.
 - **Limits first.** Lot size, open positions, daily loss, allowed symbols and trading hours are checked before a preview is issued. An empty symbol allow-list blocks everything.
 - **Kill switch.** One switch disables all write endpoints, including a confirmation already in flight. It stays engaged across a restart, and releasing it needs a login session and a fresh authenticator code.
 - **Demo by default.** Live trading needs an explicit setting and a UI banner. The backend refuses to start in demo mode when the account reports real, and refuses chat if the account switches while it runs. The EA refuses writes on a real account unless it was started with `InpAllowReal = true`.

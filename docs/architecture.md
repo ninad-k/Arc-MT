@@ -37,7 +37,10 @@ flowchart LR
   VOICEC["jarvis-voice: Whisper STT, Piper TTS"]
   PERSONA["jarvis-persona: persona packs, prompt frame, wake phrases, voices"]
   SYMB["jarvis-symbols: canonical names, per-broker symbol maps, detection"]
-  DB[("SQLite data/jarvis.db: audit, users, revoked_sessions, kill_switch, user_settings, limit_overrides")]
+  MARKET["jarvis-market: indicators, scoring, market views (pure)"]
+  NEWS["jarvis-news: Finnhub and Alpha Vantage, cache, tone"]
+  NEWSAPI["News provider over HTTPS (optional)"]
+  DB[("SQLite data/jarvis.db: audit, users, revoked_sessions, kill_switch, user_settings, limit_overrides, market_views")]
   OLLAMA["Ollama on loopback"]
   CLOUD["Anthropic or OpenAI over HTTPS"]
   EA["JarvisBridge EA: ZeroMQ REP on loopback, inside MT5"]
@@ -58,6 +61,10 @@ flowchart LR
   TOOLS --> BRC
   TOOLS --> SYMB
   TRADE --> SYMB
+  TOOLS --> MARKET
+  TOOLS --> NEWS
+  NEWS --> NEWSAPI
+  TOOLS --> DB
   TOOLS --> GATE
   TRADE --> GATE
   TRADE --> BRC
@@ -87,20 +94,22 @@ Whisper build, and tagged releases). See "Build and release pipeline" below.
 
 | Unit | Responsibility | Main files |
 |---|---|---|
-| `jarvis-bridge-client` (`crates/bridge-client`) | Wire types (`Command`, replies, DTOs, retcodes). `BridgeClient` is one actor: one request in flight, a timeout (default 3 s), a socket reset after a failure, and a reply-id check. Every message is signed with the shared bridge key (two frames, HMAC-SHA256) and every reply is verified (ADR-0016). The `mock` feature provides an in-process REP server, with the same authentication, and a standalone mock EA. | `src/protocol.rs`, `src/auth.rs`, `src/client.rs`, `src/mock.rs`, `src/mock_trade.rs`, `src/error.rs`; examples `bridge_cli.rs`, `mock_server.rs` |
+| `jarvis-bridge-client` (`crates/bridge-client`) | Wire types (`Command`, replies, DTOs, retcodes), including the market-data types (`Timeframe`, `Bar`, `Rates`, `CalendarEvent`) and the `get_rates` and `get_calendar` calls (`get_rates` retries once when the history is not loaded yet). `BridgeClient` is one actor: one request in flight, a timeout (default 3 s), a socket reset after a failure, and a reply-id check. Every message is signed with the shared bridge key (two frames, HMAC-SHA256) and every reply is verified (ADR-0016). The `mock` feature provides an in-process REP server, with the same authentication, and a standalone mock EA. | `src/protocol.rs`, `src/auth.rs`, `src/client.rs`, `src/mock.rs`, `src/mock_trade.rs`, `src/mock_market.rs`, `src/error.rs`; examples `bridge_cli.rs`, `mock_server.rs` |
 | `jarvis-llm` (`crates/llm`) | `LlmProvider` trait with tool calling, `build_provider`, and the Ollama, Anthropic and OpenAI clients. Reads API keys from the variable named in config. | `src/lib.rs`, `src/types.rs`, `src/ollama.rs`, `src/anthropic.rs`, `src/openai.rs`, `src/util.rs` |
 | `jarvis-gate` (`crates/gate`) | The action gate: limit checks, the deterministic intent parser (English and Hinglish), previews, one-time confirmation tokens with their stages and timing, and the kill switch. No I/O, so it is tested on its own. | `src/limits.rs`, `src/intent.rs`, `src/preview.rs`, `src/tokens.rs`, `src/killswitch.rs` |
 | `jarvis-voice` (`crates/voice`) | WAV decoding, transcript clean-up and corrections, Whisper STT (feature `whisper`), Piper TTS as a child process. | `src/audio.rs`, `src/stt.rs`, `src/text.rs`, `src/tts.rs` |
 | `jarvis-persona` (`crates/persona`) | Persona packs from `personas/*.toml`: loading and validation, the registry, wake-phrase matching, and `compose_system_prompt`, which places a persona's personality inside the fixed prompt frame. It holds no tools, limits or safety rules. | `src/lib.rs` |
 | `jarvis-symbols` (`crates/symbols`) | Broker-aware symbol mapping: the canonical instrument catalog, the three map layers (user, curated, generated) with their resolution order, and the automatic mapper that reads a broker's full symbol list. Pure logic apart from loading and saving its TOML files. | `src/lib.rs`, `catalog.rs`, `layers.rs`, `automap.rs`, `text.rs` |
-| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), broker identity and symbol-map detection (account switches, previews bound to the account), login and sessions, user settings and tighten-only limit overrides, persona selection, voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `broker.rs`, `symbols_routes.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql`, `0002_users.sql`, `0003_kill_switch.sql` |
-| `JarvisBridge` EA (`mql5/`) | ZeroMQ REP socket on loopback, polled from `OnTimer` (20 ms, at most 10 requests per tick). Validates each request before doing anything. Read commands, plus five write commands that run only on request. | `Experts/JarvisMT/JarvisBridge.mq5`; `Include/Jarvis/{Json,Protocol,ReadHandlers,TradeHandlers}.mqh`; self-test `Scripts/JarvisMT/JarvisSelfTest.mq5` |
+| `jarvis-market` (`crates/market`) | Intraday market views. Pure functions, no I/O and no clock: indicators (SMA, EMA, Wilder RSI and ATR, MACD, Bollinger, VWAP, classic pivots, fractal swing levels) and `analyze`, which turns closed bars, the live price, calendar events and an optional news score into a `MarketView` (bias, confidence, factors, levels, setup). `ViewConfig` holds the weights and thresholds. See [market-view.md](market-view.md). | `src/indicators.rs`, `src/analyze.rs`, `src/config.rs`, `src/types.rs`, `src/view.rs` |
+| `jarvis-news` (`crates/news`) | News headlines and sentiment for market views. The `NewsProvider` trait with a Finnhub and an Alpha Vantage client, and `NewsService` (per-instrument cache, relevance filter, tone from the provider or a word list, direction for currency pairs, recency-weighted score). API keys are redacted from every error and are never logged. | `src/finnhub.rs`, `src/alphavantage.rs`, `src/service.rs`, `src/relevance.rs`, `src/lexicon.rs`, `src/http.rs`, `src/instrument.rs`, `src/types.rs`, `src/error.rs` |
+| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), broker identity and symbol-map detection (account switches, previews bound to the account), login and sessions, user settings and tighten-only limit overrides, persona selection, market views (the `get_market_view`, `get_economic_calendar` and `get_news` tools, the `/api/market/*` routes, the view journal and its scoring task), voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `broker.rs`, `symbols_routes.rs`, `market.rs`, `market_journal.rs`, `market_routes.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql` to `0006_audit_persona.sql`, and `0007_market_views.sql` for the view journal |
+| `JarvisBridge` EA (`mql5/`) | ZeroMQ REP socket on loopback, polled from `OnTimer` (20 ms, at most 10 requests per tick). Validates each request before doing anything. Read commands (including `get_rates` and `get_calendar` since EA 0.5.0), plus five write commands that run only on request. | `Experts/JarvisMT/JarvisBridge.mq5`; `Include/Jarvis/{Json,Protocol,ReadHandlers,MarketData,TradeHandlers}.mqh`; self-test `Scripts/JarvisMT/JarvisSelfTest.mq5` |
 | Vendored mql-zmq | ZeroMQ binding for MQL5, with a local patch and its DLLs (checksums in `mql5/THIRD_PARTY.md`) | `Include/Zmq/`, `Include/Mql/`, `Libraries/*.dll` |
 | `web` | SvelteKit single-page app (adapter-static, fallback `index.html`). Typed client for the HTTP contract, state stores, components (HUD, orb, confirm modal, kill switch, audit page, login), PWA service worker, mock mode. | `src/lib/api.ts`, `src/lib/state/*.svelte.ts`, `src/lib/components/*.svelte`, `src/routes/`, `src/service-worker/`, `static/manifest.webmanifest`; `vite.config.ts` |
 | `apps/desktop` | Tauri 2 shell. A bundled launcher page asks for the backend URL, checks `/api/health`, then navigates to that origin. No trading logic. Not in the Cargo workspace. | `src-tauri/`, `ui/`, `src-tauri/tauri.conf.json` |
 | `scripts/` | Install and compile the EA (SHA-256 checks), download voice models with pinned hashes, and run every local check. | `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `check.ps1` |
 
-Dependencies point one way. `jarvis-api` depends on the six library crates (gate, llm, voice, bridge-client, persona and symbols). The EA and the web app depend only on the wire contracts
+Dependencies point one way. `jarvis-api` depends on the eight library crates (gate, llm, voice, bridge-client, persona, symbols, market and news). `jarvis-market` does not depend on the bridge client or on the news crate: the API converts bars and events into its input types. The EA and the web app depend only on the wire contracts
 (`docs/protocol.md`, `docs/api.md`). Library crates return typed errors. Only the binary uses `anyhow`.
 
 ## Request flow 1: a read question
@@ -240,6 +249,50 @@ at a time, and a request that waits more than 5 s for its turn gets `429`.
 
 Voice logs (`voice_stt`, `voice_tts`) hold text and sizes, never audio.
 
+## Request flow 4: a market view
+
+Example: "what's your view on gold for today?". A view reads data and computes. It does not write.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant API as jarvis-api
+  participant L as LLM provider
+  participant BR as bridge client
+  participant EA as JarvisBridge EA
+  participant M as jarvis-market
+  participant N as jarvis-news
+  B->>API: POST /api/chat {message}
+  API->>L: history plus tool specs
+  L-->>API: tool call get_market_view {symbol}
+  API->>API: resolve the symbol (canonical name to the broker's symbol)
+  API->>BR: ping, get_price, get_symbol, get_rates (M5, M15, H1, H4, D1), get_calendar
+  BR->>EA: JSON requests (ZeroMQ)
+  EA-->>BR: bid and ask, bars, calendar events (server time)
+  opt a news provider is set up
+    API->>N: summary(instrument)
+    N-->>API: score, label, up to 5 headlines (cached for 10 minutes)
+  end
+  API->>M: analyze(ViewInput, ViewConfig)
+  M-->>API: MarketView (bias, confidence, factors, levels, setup)
+  API->>API: save the view, audit market_view
+  API->>L: tool result
+  L-->>API: two or three sentences that repeat its numbers
+  API->>API: grounding check of every figure
+  API-->>B: reply (the web app also shows the view card)
+```
+
+Points that the code enforces:
+
+- A view is a read tool (`ReadTool`). It has no path to the gate's write side, and it never creates a preview. **Prepare trade** is a separate request from the UI (`POST /api/market/prepare`) that builds an order proposal and calls `Trading::propose` with the source `Ui`, so every limit and the kill switch apply and the normal confirmation follows.
+- The numbers come from `jarvis-market`, which is deterministic. The model only repeats them, and the grounding check withholds a reply that states a figure no tool result contains.
+- A news failure or a missing provider removes the news factor and nothing else. A bridge failure on the bars or the calendar is a tool error, and the model is told MT5 could not be read.
+- Times in the computation are the broker's server time. The API converts the result to UTC for display, using the offset it learns from the EA's `ping`.
+- A background task scores the saved views against M5 bars at start-up and then every 5 minutes (TP first, SL first, expired, no setup, and whether the bias was right). It does not run when `[market] enabled = false`. The results are read through `GET /api/market/journal`.
+
+The scoring rules, indicators and news handling are described in [market-view.md](market-view.md), and the decision in [ADR-0019](adr/0019-market-views.md).
+
 ## Where each rule is enforced
 
 The rules are the ten core rules of [SPEC.md](../SPEC.md). "Test" names the test area; tests live in `crates/*/src` (unit),
@@ -247,7 +300,7 @@ The rules are the ten core rules of [SPEC.md](../SPEC.md). "Test" names the test
 
 | Rule | Enforced in | Notes |
 |---|---|---|
-| 1. The LLM can only read and propose | `crates/api/src/tools.rs` (closed `ReadTool` and `ProposeTool` enums, no write variant); `crates/api/src/trading.rs` (only the confirm path calls the write sink); EA `TradeHandlers.mqh` (writes only on a request) | Tests check that no write tool is offered to the model. |
+| 1. The LLM can only read and propose | `crates/api/src/tools.rs` (closed `ReadTool` and `ProposeTool` enums, no write variant); `crates/api/src/trading.rs` (only the confirm path calls the write sink); EA `TradeHandlers.mqh` (writes only on a request) | Tests check that no write tool is offered to the model. The market view tools (`get_market_view`, `get_economic_calendar`, `get_news`) are `ReadTool` variants. |
 | 2. A preview with a one-time 15-second token | `crates/gate/src/preview.rs` (`ActionPreview`), `crates/gate/src/tokens.rs` (`TokenStore::issue`, `confirm`, `cancel`), TTL from `[trading]` | Tokens are kept in memory. A restart invalidates them. |
 | 3. Only `POST /api/confirm/{token}` sends a write | `crates/api/src/routes.rs` (route table), `crates/api/src/trading.rs` (`confirm` and `execute`) | Close and cancel routes create previews only. |
 | 4. Batch actions need a second confirmation with the count | `crates/gate/src/tokens.rs` and `preview.rs` (stages `first` and `second`), `crates/api/src/trading.rs` | Message repeats the count. |
@@ -286,8 +339,9 @@ Other enforced controls:
 | SQLite `kill_switch` | `data/jarvis.db` | One row: whether the kill switch is engaged, why, and when it changed. Read at startup. | Rewritten on every engage and release. A switch that is engaged stays engaged across restarts; an unreadable row engages it. |
 | SQLite `user_settings` | `data/jarvis.db` | The signed-in user's preferences: persona, language model, voice options, watchlist and symbol aliases. | Changed through `PUT /api/settings`. Kept across restarts. |
 | SQLite `limit_overrides` | `data/jarvis.db` | The tighten-only trading limit overrides set from Settings. They are checked against the configured limits and apply to every persona. | Changed through `PUT` or `DELETE /api/settings/limits`, which need a TOTP code when login is on. Kept across restarts. |
+| SQLite `market_views` | `data/jarvis.db` | Every view that was computed: id, time (UTC, and on the broker's server clock), canonical and broker symbol, bias, confidence, score, whether it stood aside, the setup's side, the middle of the entry zone, stop and first take profit, the mid price and the H1 ATR at the time, the end of validity and the full view JSON (which includes the headline titles and links), plus the outcome columns that the scoring task fills in. No account login or name. | Written by each view request, updated by the scoring task every 5 minutes. Kept across restarts. Not trimmed by the server. |
 | In memory | Process | Chat sessions (at most 100, history capped at 40 messages), confirmation tokens, rate limit counters, open WebSockets. | Lost on restart. |
-| Files | `config/jarvis.toml`, `.env`, `personas/*.toml` | Settings, secrets and persona packs. | Edited by hand. Persona packs are read at startup. |
+| Files | `config/jarvis.toml`, `.env`, `personas/*.toml` | Settings, secrets (including a news provider key) and persona packs. | Edited by hand. Persona packs are read at startup. |
 | Files | `config/instruments.toml`, `config/broker_symbols.toml` | The canonical instruments and the curated per-broker symbol maps, checked into the repository. | Edited by hand. Read at startup. |
 | Files | `data/broker_symbols.generated.toml`, `data/broker_symbols.user.toml` | The detected symbol map of each broker seen (generated), and your overrides from Settings (user). | Generated: rebuilt by each detection, safe to delete. User: kept until you reset an override. Written by the API only. |
 | Files | `data/broker-catalogs/<slug>.json` | Each broker's full symbol list, with the detection candidates and scores. No account login or name. | Rebuilt by each detection. Safe to delete. |
@@ -306,6 +360,18 @@ Other enforced controls:
 | 5173 | Vite dev server | Local | Proxies `/api` (including WebSocket) to 8787. |
 | 443 | Optional reverse proxy | Public | Terminates TLS and forwards to a loopback `jarvis-api`. |
 
+## Outbound connections
+
+Besides the loopback links above, `jarvis-api` makes outbound HTTPS requests only to the services you turn on:
+
+| To | When | What is sent |
+|---|---|---|
+| Anthropic or OpenAI | A cloud language model is selected | Your messages and the tool results |
+| `finnhub.io` | `[market.news] provider = "finnhub"` | A news category (`forex`, `crypto` or `general`), and the key in a header |
+| `www.alphavantage.co` | `[market.news] provider = "alphavantage"` | A ticker or topic, a start time and the key in the query string. The URL is never logged. |
+
+Nothing about your account, positions or orders goes to a news provider. See [SECURITY.md](../SECURITY.md).
+
 ## Failure modes
 
 | Failure | What happens | What the user sees | Recovery |
@@ -323,6 +389,10 @@ Other enforced controls:
 | Audit insert fails at runtime | Logged at error level. The request continues. | Nothing visible. | Investigate the log. Audit gaps are a defect to fix at once. |
 | TLS certificate missing or unreadable at start | Startup fails with the file names. | Process exits. | Fix the paths. Restart after every renewal. |
 | Secret changed or too short | Startup refuses while login is on. Old TOTP secrets cannot be read after a change. | Logins fail with the message that the stored secret cannot be decrypted. | Reset TOTP for each user (see the [runbook](runbook.md)). |
+| EA older than 0.5.0 | `get_rates` and `get_calendar` are answered with `retcode -2` (unknown command). Everything else works. | A market view fails with `502 ea_outdated` and a message that says to update JarvisBridge to 0.5.0 or newer. | Reinstall the EA (`scripts/install-ea.ps1`, `scripts/compile-ea.ps1`) and re-attach it. |
+| Price history not loaded in MT5 | The EA answers a 44xx or 4806 code. The bridge client waits 500 ms and asks once more. | The view fails after the second answer, or its notes list the missing factors. | Ask again. Open a chart of the symbol so MT5 downloads the history. |
+| MT5 calendar empty or unreachable | The view has no events. The stand-aside rule cannot see any. | An empty events list. | Check the Calendar tab in MT5 and the terminal's connection. |
+| News provider fails (rate limit, timeout, rejected key) | A cached summary younger than an hour is used if there is one. Otherwise the view is computed without the news factor. | "unavailable" or "not configured" in the news section. | Wait, raise `cache_minutes`, or check the key in `.env`. |
 | A symbol map file is malformed, or the instrument or curated file is missing | Startup still runs, with a warning. All symbol maps are off: names pass through with the configured `suffix`, and detection does not run. | Orders may be refused as unknown symbols if the names differ from the broker's. | Fix the file named in the log and restart. A corrupt generated file can be deleted, then restart. See [symbol-mapping.md](symbol-mapping.md#troubleshooting). |
 
 ## Build and release pipeline
