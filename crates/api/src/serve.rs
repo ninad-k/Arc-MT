@@ -52,6 +52,7 @@ pub async fn run(
     let state = AppState::build(config).await?;
     state.startup_check().await?;
     let _background = state.spawn_background_tasks();
+    let _market_evaluator = state.spawn_market_evaluator();
 
     let listener = TcpListener::bind(addr)
         .with_context(|| format!("binding {addr} (is another jarvis-api running?)"))?;

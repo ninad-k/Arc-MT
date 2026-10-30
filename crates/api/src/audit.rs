@@ -49,6 +49,10 @@ pub enum AuditKind {
     SymbolMapDetected,
     /// The user set or cleared a symbol mapping in Settings.
     SymbolMapOverride,
+    /// A market view was computed (symbol, bias, confidence, stand-aside).
+    MarketView,
+    /// A market view was turned into a trade preview request from the UI.
+    MarketPrepare,
 }
 
 impl AuditKind {
@@ -77,6 +81,8 @@ impl AuditKind {
             AuditKind::UngroundedReplyBlocked => "ungrounded_reply_blocked",
             AuditKind::SymbolMapDetected => "symbol_map_detected",
             AuditKind::SymbolMapOverride => "symbol_map_override",
+            AuditKind::MarketView => "market_view",
+            AuditKind::MarketPrepare => "market_prepare",
         }
     }
 }

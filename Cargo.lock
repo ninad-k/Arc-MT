@@ -1549,6 +1549,8 @@ dependencies = [
  "jarvis-bridge-client",
  "jarvis-gate",
  "jarvis-llm",
+ "jarvis-market",
+ "jarvis-news",
  "jarvis-persona",
  "jarvis-symbols",
  "jarvis-voice",
@@ -1574,6 +1576,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-service",
+ "wiremock",
 ]
 
 [[package]]
@@ -1613,6 +1616,29 @@ name = "jarvis-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "jarvis-market"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jarvis-news"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",

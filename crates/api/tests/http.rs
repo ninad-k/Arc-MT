@@ -414,7 +414,10 @@ async fn system_prompt_and_tools_are_sent_to_the_model() {
         names,
         [
             "get_account",
+            "get_economic_calendar",
             "get_history",
+            "get_market_view",
+            "get_news",
             "get_orders",
             "get_positions",
             "get_price",

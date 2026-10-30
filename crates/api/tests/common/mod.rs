@@ -283,6 +283,10 @@ pub struct Options<'a> {
     pub maps: bool,
     /// `[symbols] auto_detect` (only matters with `maps`).
     pub auto_detect: bool,
+    /// Body of the `[market]` table (it may hold `[market.news]` lines); empty keeps defaults.
+    pub market: &'a str,
+    /// Replaces the news service (default: none configured).
+    pub news: Option<jarvis_news::NewsService>,
 }
 
 impl Default for Options<'_> {
@@ -303,6 +307,8 @@ impl Default for Options<'_> {
             claude_llm: None,
             maps: false,
             auto_detect: true,
+            market: "",
+            news: None,
         }
     }
 }
@@ -384,6 +390,15 @@ auto_detect = {}
         );
         data_dir = Some(dir);
     }
+    if !opts.market.trim().is_empty() {
+        toml.push_str(&format!(
+            "
+[market]
+{}
+",
+            opts.market
+        ));
+    }
     let config = Config::from_toml_str(&toml).expect("test config");
     let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
@@ -426,6 +441,7 @@ auto_detect = {}
         auth: auth.clone(),
         voice: opts.voice,
         personas: Some(opts.personas.unwrap_or_else(real_personas)),
+        news: Some(opts.news.unwrap_or_else(jarvis_news::NewsService::disabled)),
     };
     let state = AppState::new_with(config, bridge, audit.clone(), slots, overrides);
     TestApp {

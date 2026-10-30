@@ -65,6 +65,173 @@ pub struct Config {
     /// `[personas]`: where the persona packs live and which one is the default.
     #[serde(default)]
     pub personas: PersonasConfig,
+    /// `[market]`: intraday market views, the economic calendar and optional news.
+    #[serde(default)]
+    pub market: MarketConfig,
+}
+
+/// `[market]`. Views are on by default; news is off until a provider is chosen.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketConfig {
+    /// Turn market views off: the routes answer 404 and the model gets no market tools.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How long a view stays valid, in minutes (15 to 1440).
+    #[serde(default = "default_horizon_minutes")]
+    pub horizon_minutes: i64,
+    /// A high-impact event this many minutes before or after now makes a view stand aside
+    /// (0 to 240).
+    #[serde(default = "default_blackout_minutes")]
+    pub event_blackout_minutes: i64,
+    /// The least important calendar events that are fetched: low, moderate or high.
+    #[serde(default = "default_calendar_importance")]
+    pub calendar_min_importance: jarvis_bridge_client::protocol::Importance,
+    /// Views, news and calendar requests per minute and session (1 to 10000).
+    #[serde(default = "default_market_rate_limit")]
+    pub rate_limit_per_minute: usize,
+    #[serde(default)]
+    pub news: MarketNewsConfig,
+    /// Advanced: overrides for the scoring model (weights, thresholds, ATR multiples). See
+    /// `jarvis_market::ViewConfig` for the keys. `horizon_minutes` and `event_blackout_minutes`
+    /// above win over the same keys here.
+    #[serde(default)]
+    pub view: jarvis_market::ViewConfig,
+}
+
+impl Default for MarketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            horizon_minutes: default_horizon_minutes(),
+            event_blackout_minutes: default_blackout_minutes(),
+            calendar_min_importance: default_calendar_importance(),
+            rate_limit_per_minute: default_market_rate_limit(),
+            news: MarketNewsConfig::default(),
+            view: jarvis_market::ViewConfig::default(),
+        }
+    }
+}
+
+impl MarketConfig {
+    /// The scoring model with the `[market]` horizon and blackout applied.
+    pub fn view_config(&self) -> jarvis_market::ViewConfig {
+        let mut cfg = self.view.clone();
+        cfg.horizon_minutes = self.horizon_minutes;
+        cfg.event_blackout_minutes = self.event_blackout_minutes;
+        cfg
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if !(15..=1440).contains(&self.horizon_minutes) {
+            bail!("market.horizon_minutes must be between 15 and 1440");
+        }
+        if !(0..=240).contains(&self.event_blackout_minutes) {
+            bail!("market.event_blackout_minutes must be between 0 and 240");
+        }
+        if !(1..=10_000).contains(&self.rate_limit_per_minute) {
+            bail!("market.rate_limit_per_minute must be between 1 and 10000");
+        }
+        if !(1..=240).contains(&self.news.cache_minutes) {
+            bail!("market.news.cache_minutes must be between 1 and 240");
+        }
+        if let Some(name) = &self.news.api_key_env
+            && (name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        {
+            bail!(
+                "market.news.api_key_env must be the NAME of an environment variable                  (letters, digits and underscores), not the key itself"
+            );
+        }
+        // TOML can spell inf and nan; they serialise to null.
+        let model = serde_json::to_value(&self.view).context("market.view")?;
+        if model
+            .as_object()
+            .is_some_and(|o| o.values().any(serde_json::Value::is_null))
+        {
+            bail!("market.view has a value that is not a finite number");
+        }
+        Ok(())
+    }
+}
+
+/// The news provider of the market view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NewsProviderKind {
+    #[default]
+    None,
+    Finnhub,
+    Alphavantage,
+}
+
+impl NewsProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NewsProviderKind::None => "none",
+            NewsProviderKind::Finnhub => "finnhub",
+            NewsProviderKind::Alphavantage => "alphavantage",
+        }
+    }
+
+    /// The variable that holds the key unless `api_key_env` names another one.
+    pub fn default_key_env(self) -> Option<&'static str> {
+        match self {
+            NewsProviderKind::None => None,
+            NewsProviderKind::Finnhub => Some("FINNHUB_API_KEY"),
+            NewsProviderKind::Alphavantage => Some("ALPHAVANTAGE_API_KEY"),
+        }
+    }
+}
+
+/// `[market.news]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketNewsConfig {
+    /// `none`, `finnhub` or `alphavantage`.
+    #[serde(default)]
+    pub provider: NewsProviderKind,
+    /// Name of the environment variable that holds the provider's key. Default: the
+    /// provider's usual one (`FINNHUB_API_KEY`, `ALPHAVANTAGE_API_KEY`).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// How long a news summary is reused, in minutes (1 to 240).
+    #[serde(default = "default_news_cache_minutes")]
+    pub cache_minutes: u64,
+}
+
+impl Default for MarketNewsConfig {
+    fn default() -> Self {
+        Self {
+            provider: NewsProviderKind::None,
+            api_key_env: None,
+            cache_minutes: default_news_cache_minutes(),
+        }
+    }
+}
+
+impl MarketNewsConfig {
+    /// The environment variable to read the key from, when a provider is chosen.
+    pub fn key_env(&self) -> Option<&str> {
+        self.api_key_env
+            .as_deref()
+            .or_else(|| self.provider.default_key_env())
+    }
+}
+
+fn default_horizon_minutes() -> i64 {
+    240
+}
+fn default_blackout_minutes() -> i64 {
+    30
+}
+fn default_calendar_importance() -> jarvis_bridge_client::protocol::Importance {
+    jarvis_bridge_client::protocol::Importance::Moderate
+}
+fn default_market_rate_limit() -> usize {
+    30
+}
+fn default_news_cache_minutes() -> u64 {
+    10
 }
 
 /// `[personas]`: a folder of `<id>.toml` packs (see `personas/jarvis.toml`) and the persona
@@ -599,6 +766,7 @@ impl Config {
             );
         }
         self.validate_trading()?;
+        self.market.validate()?;
         Ok(())
     }
 
@@ -777,6 +945,90 @@ folder = \"x\""
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn market_section_defaults_match_the_spec() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        let m = &c.market;
+        assert!(m.enabled);
+        assert_eq!(m.horizon_minutes, 240);
+        assert_eq!(m.event_blackout_minutes, 30);
+        assert_eq!(
+            m.calendar_min_importance,
+            jarvis_bridge_client::protocol::Importance::Moderate
+        );
+        assert_eq!(m.news.provider, NewsProviderKind::None);
+        assert_eq!(m.news.cache_minutes, 10);
+        assert_eq!(m.news.key_env(), None);
+        assert_eq!(m.rate_limit_per_minute, 30);
+        let view = m.view_config();
+        assert_eq!(view.horizon_minutes, 240);
+        assert_eq!(view.event_blackout_minutes, 30);
+        assert_eq!(view, jarvis_market::ViewConfig::default());
+    }
+
+    #[test]
+    fn market_section_overrides_and_the_example_file() {
+        let c = Config::from_toml_str(&minimal(
+            r#"[market]
+horizon_minutes = 120
+event_blackout_minutes = 45
+calendar_min_importance = "high"
+[market.news]
+provider = "alphavantage"
+cache_minutes = 30
+[market.view]
+weight_h4_trend = 30.0
+horizon_minutes = 999"#,
+        ))
+        .unwrap();
+        assert_eq!(c.market.news.provider, NewsProviderKind::Alphavantage);
+        assert_eq!(c.market.news.key_env(), Some("ALPHAVANTAGE_API_KEY"));
+        assert_eq!(c.market.news.cache_minutes, 30);
+        let view = c.market.view_config();
+        assert_eq!(view.weight_h4_trend, 30.0);
+        // [market] wins over [market.view] for the two keys they share.
+        assert_eq!(view.horizon_minutes, 120);
+        assert_eq!(view.event_blackout_minutes, 45);
+
+        let finnhub =
+            Config::from_toml_str(&minimal("[market.news]\nprovider = \"finnhub\"")).unwrap();
+        assert_eq!(finnhub.market.news.key_env(), Some("FINNHUB_API_KEY"));
+        let named = Config::from_toml_str(&minimal(
+            "[market.news]\nprovider = \"finnhub\"\napi_key_env = \"MY_KEY\"",
+        ))
+        .unwrap();
+        assert_eq!(named.market.news.key_env(), Some("MY_KEY"));
+
+        // The shipped example documents the section and loads as it is.
+        let example = Config::from_toml_str(EXAMPLE).unwrap();
+        assert!(example.market.enabled);
+        assert_eq!(example.market.news.provider, NewsProviderKind::None);
+        assert!(EXAMPLE.contains("[market.news]"));
+        assert!(EXAMPLE.contains("FINNHUB_API_KEY") && EXAMPLE.contains("ALPHAVANTAGE_API_KEY"));
+    }
+
+    #[test]
+    fn market_section_is_validated() {
+        for bad in [
+            "[market]\nhorizon_minutes = 5",
+            "[market]\nhorizon_minutes = 5000",
+            "[market]\nevent_blackout_minutes = -1",
+            "[market]\nevent_blackout_minutes = 500",
+            "[market]\nrate_limit_per_minute = 0",
+            "[market]\ncalendar_min_importance = \"critical\"",
+            "[market]\nsurprise = 1",
+            "[market.news]\nprovider = \"bloomberg\"",
+            "[market.news]\ncache_minutes = 0",
+            "[market.news]\ncache_minutes = 1000",
+            "[market.news]\nprovider = \"finnhub\"\napi_key_env = \"\"",
+            // A key pasted where the variable name belongs must not be accepted.
+            "[market.news]\nprovider = \"finnhub\"\napi_key_env = \"d1x-secret=key\"",
+            "[market.view]\nbias_threshold = nan",
+        ] {
+            assert!(Config::from_toml_str(&minimal(bad)).is_err(), "{bad}");
+        }
     }
 
     fn minimal(extra: &str) -> String {

@@ -153,3 +153,29 @@ max_seconds = 30
 [personas]
 dir = "personas"
 default = "jarvis"
+
+# ---- Market views: an intraday view of an instrument (bias, confidence, entry zone, stop and
+# two targets, key levels, reasons) computed in code from the broker's own prices, the MT5
+# economic calendar and, if you set a provider below, headline news. A view is information
+# only: it never places or proposes a trade. "Prepare trade" in the app turns one into the
+# usual preview, which goes through every limit and needs your confirmation. Every view is
+# stored and later scored against what the price did. Needs the EA at version 0.5.0 or newer.
+[market]
+enabled = true
+horizon_minutes = 240            # how long a view stays valid (15 to 1440)
+event_blackout_minutes = 30      # stand aside this close to a high-impact event (0 to 240)
+calendar_min_importance = "moderate"   # low | moderate | high
+rate_limit_per_minute = 30       # views and news requests per minute and session
+
+# News is optional. With provider = "none" the view simply has no news factor.
+# finnhub: https://finnhub.io (free key). alphavantage: https://www.alphavantage.co (free key).
+# The key is read from the environment (put it in .env), never from this file.
+[market.news]
+provider = "none"                # none | finnhub | alphavantage
+api_key_env = "FINNHUB_API_KEY"  # the NAME of the variable; ALPHAVANTAGE_API_KEY for alphavantage
+cache_minutes = 10
+
+# Advanced: change the scoring model (weights, thresholds, ATR multiples). The keys are those
+# of jarvis_market::ViewConfig; leave this out unless you know what you are changing.
+# [market.view]
+# weight_h4_trend = 25.0

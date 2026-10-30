@@ -446,6 +446,7 @@ pub fn build_shared_rules(
          
          What you can do:
          - Read live data with your tools: prices (get_price), the account summary            (get_account), open positions (get_positions), pending orders (get_orders) and            trade history (get_history).
+         - Analyse the market with get_market_view (a computed intraday view: bias, confidence, trade setup levels and the reasons), get_economic_calendar (upcoming and recent economic events) and get_news (headline tone, when a news provider is configured). These only read data: none of them places or proposes a trade.
          - Propose trades with propose_order, propose_modify, propose_close and propose_cancel.            PROPOSING DOES NOT EXECUTE ANYTHING. A proposal only creates a preview. The user must            confirm it in the app (the Confirm button, or by saying \"confirm\") within a few            seconds. You cannot confirm, cancel or execute anything yourself.
          - Never state a price, balance, profit, position or any other number that you did not            get from a tool in this conversation. Prices move: for any question about a current            value, call the tool again instead of reusing an earlier answer. If a tool fails, say            so plainly; do not guess.
          
@@ -461,7 +462,7 @@ pub fn build_shared_rules(
          - If a request is ambiguous (which symbol? which position? which dates?), ask one short            clarifying question instead of guessing. Relative dates are not ambiguous: work out            \"today\", \"yesterday\", \"this week\" (Monday to now), \"last week\" and \"this month\" from            the broker server time above and use them directly.
          - Instruments have standard names (XAUUSD, US100, EURUSD, ...); each broker spells them            its own way, and the tools map between the two (a result's \"symbol\" is the broker's            name, \"canonical\" the standard one; say the standard name to the user). Symbol            aliases (the user's words -> standard name): {alias_text}. You may pass the            user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear            names (for example \"cold\" for \"gold\").
          - Be concise and easy to read aloud: 1 to 3 sentences unless you are listing items.            No markdown tables, no emojis. Say numbers plainly with their symbol or currency.
-         - You are not a financial adviser; do not give investment recommendations."
+         - Market views: for any request for a view, opinion, outlook, bias or buy/sell suggestion on an instrument, call get_market_view and relay it in two or three sentences: the bias, the confidence, the setup levels (entry zone, stop loss, take profit) when there is a setup, and the two main reasons from its factors. Mention high-impact events that are coming up, and when the view stands aside say why. Say it is a computed analysis and not a guarantee or financial advice, and never present it as certain. Never add levels, reasons or numbers that the tool did not give, and if the tool fails say so instead of giving an opinion from memory. Never propose a trade from a view on your own: propose one only when the user asks for that trade with a volume."
     )
 }
 
@@ -529,6 +530,27 @@ mod tests {
         assert!(p.contains("Never invent a volume"));
         assert!(p.contains("name the limit"));
         assert!(p.contains("clarifying question"));
+    }
+
+    #[test]
+    fn prompt_has_the_market_view_rules_and_not_the_old_adviser_line() {
+        let p = build_shared_rules("t".into(), "s".into(), &[]);
+        for tool in ["get_market_view", "get_economic_calendar", "get_news"] {
+            assert!(p.contains(tool), "{tool} missing");
+        }
+        for rule in [
+            "call get_market_view and relay it in two or three sentences",
+            "the two main reasons",
+            "high-impact events that are coming up",
+            "computed analysis and not a guarantee",
+            "never present it as certain",
+            "Never add levels, reasons or numbers that the tool did not give",
+            "only when the user asks for that trade with a volume",
+        ] {
+            assert!(p.contains(rule), "{rule} missing");
+        }
+        assert!(!p.contains("do not give investment recommendations"), "{p}");
+        assert!(!p.contains("You are not a financial adviser"), "{p}");
     }
 
     #[test]

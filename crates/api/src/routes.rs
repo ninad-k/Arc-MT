@@ -30,7 +30,7 @@ use crate::security::{self, Security};
 use crate::state::{AppState, Budget, ProviderSlot};
 use crate::static_site::StaticSite;
 use crate::trading::{ConfirmResponse, PreviewDto, ProposeRequest, ProposeSource, TradingError};
-use crate::{settings_routes, symbols_routes, voice, ws};
+use crate::{market_routes, settings_routes, symbols_routes, voice, ws};
 
 /// Longest accepted chat message, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 2000;
@@ -104,6 +104,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/symbols/detect", post(symbols_routes::detect_post))
         .route("/api/symbols/catalog", get(symbols_routes::catalog_get))
         .route("/api/symbols/export", get(symbols_routes::export_get))
+        .route("/api/market/calendar", get(market_routes::calendar_get))
+        .route("/api/market/journal", get(market_routes::journal_get))
+        .route("/api/market/prepare", post(market_routes::prepare_post))
         .route("/api/cancel/{token}", post(cancel))
         .route("/api/readback/{token}", post(readback))
         .route("/api/positions/{ticket}/close", post(close_position))
@@ -121,6 +124,16 @@ pub fn app(state: AppState) -> Router {
     let slow = Router::new()
         .route("/api/chat", post(chat).layer(budget(Budget::Chat)))
         .route("/api/confirm/{token}", post(confirm))
+        // A view reads a handful of bars, the calendar and news before it answers, so it has
+        // the long timeout and its own budget.
+        .route(
+            "/api/market/view",
+            get(market_routes::view_get).layer(budget(Budget::Market)),
+        )
+        .route(
+            "/api/market/news",
+            get(market_routes::news_get).layer(budget(Budget::Market)),
+        )
         .route("/api/voice/speak", post(voice::speak))
         .route(
             "/api/voice/transcribe",
@@ -258,6 +271,12 @@ pub enum ApiError {
     PayloadTooLarge,
     /// 422: the gate refused to build a preview.
     GateRejected(String),
+    /// 502: the EA is older than 0.5.0 and has no price history or calendar commands.
+    EaOutdated(String),
+    /// 410: a market view is past its `valid_until`.
+    ViewExpired(String),
+    /// 422: a market view has no trade setup to prepare.
+    NoSetup(String),
     /// 422 `limit_not_stricter`: a limit override that is looser than the config.
     LimitNotStricter(String),
     TokenUnknown,
@@ -323,6 +342,9 @@ impl ApiError {
             ApiError::GateRejected(m) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "gate_rejected", m.clone())
             }
+            ApiError::EaOutdated(m) => (StatusCode::BAD_GATEWAY, "ea_outdated", m.clone()),
+            ApiError::ViewExpired(m) => (StatusCode::GONE, "view_expired", m.clone()),
+            ApiError::NoSetup(m) => (StatusCode::UNPROCESSABLE_ENTITY, "no_setup", m.clone()),
             ApiError::LimitNotStricter(m) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "limit_not_stricter",
@@ -518,6 +540,7 @@ async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSessi
         "limits": state.trading().limits(),
         "persona": { "id": persona.id, "name": persona.name },
         "broker": state.broker().book().status_view(),
+        "market": state.market_status(),
     }))
 }
 
@@ -828,7 +851,7 @@ fn optional_body<T: serde::de::DeserializeOwned + Default>(body: &Bytes) -> Resu
         .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
 }
 
-async fn propose_from_ui(
+pub(crate) async fn propose_from_ui(
     state: &AppState,
     session: Option<&crate::auth::Session>,
     action: ProposedAction,

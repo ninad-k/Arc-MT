@@ -155,7 +155,7 @@ fn bridge_for(mock: &MockBridge) -> BridgeClient {
 // ------------------------------------------------------------ rule 1 (tools)
 
 #[tokio::test]
-async fn tool_specs_are_exactly_five_read_and_four_propose() {
+async fn tool_specs_are_exactly_eight_read_and_four_propose() {
     let mock = MockBridge::start().await;
     let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let specs = app.state.agent().tools().specs();
@@ -165,7 +165,10 @@ async fn tool_specs_are_exactly_five_read_and_four_propose() {
         names,
         [
             "get_account",
+            "get_economic_calendar",
             "get_history",
+            "get_market_view",
+            "get_news",
             "get_orders",
             "get_positions",
             "get_price",
@@ -175,7 +178,7 @@ async fn tool_specs_are_exactly_five_read_and_four_propose() {
             "propose_order",
         ]
     );
-    assert_eq!(ReadTool::ALL.len(), 5);
+    assert_eq!(ReadTool::ALL.len(), 8);
     assert_eq!(ProposeTool::ALL.len(), 4);
     for s in &specs {
         assert!(s.description.len() > 40, "{}", s.name);

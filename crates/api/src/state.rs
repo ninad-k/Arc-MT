@@ -11,6 +11,7 @@ use jarvis_bridge_client::protocol::{PingInfo, TradeMode};
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
 use jarvis_gate::KillSwitch;
 use jarvis_llm::{LlmProvider, ProviderConfig, ProviderKind, build_provider};
+use jarvis_news::{AlphaVantage, Finnhub, NewsService};
 use jarvis_persona::{PersonaPack, PersonaRegistry, Theme};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
@@ -21,9 +22,10 @@ use crate::auth::crypto::PasswordHasherCfg;
 use crate::auth::{AuthParts, AuthReleaseGuard, AuthService, Session};
 use crate::broker::{self, BrokerParts, BrokerService, DataPaths};
 use crate::clock::{ServerClock, TimeSource, WallClock};
-use crate::config::{Config, Mode};
+use crate::config::{Config, MarketNewsConfig, Mode, NewsProviderKind};
 use crate::events::EventBus;
 use crate::limit_overrides::PartialLimits;
+use crate::market::{MarketParts, MarketService};
 use crate::ratelimit::RateLimiter;
 use crate::settings::{
     LOCAL_USER, Rules, SettingsError, SettingsPatch, SettingsStore, UserSettings, apply_patch,
@@ -38,6 +40,9 @@ pub const JWT_SECRET_ENV: &str = "JARVIS_JWT_SECRET";
 
 /// How often expired previews and idle rate-limit keys are cleaned up.
 pub const PURGE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often the market views are scored against the price.
+pub const MARKET_EVALUATE_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// The broker account is re-read every this many purge ticks (30 s).
 const BROKER_CHECK_EVERY_TICKS: u32 = 6;
@@ -57,6 +62,8 @@ pub struct Overrides {
     /// The persona packs (default: loaded from `[personas] dir`, or one built-in Jarvis pack
     /// when that folder cannot be read; [`AppState::build`] refuses to start instead).
     pub personas: Option<PersonaRegistry>,
+    /// The news service (default: built from `[market.news]`).
+    pub news: Option<NewsService>,
 }
 
 /// A configured LLM provider that is either ready or missing something (usually an API key).
@@ -253,6 +260,9 @@ struct Inner {
     /// Per-session budgets of the expensive routes (NET-2).
     chat_limiter: RateLimiter,
     transcribe_limiter: RateLimiter,
+    market_limiter: RateLimiter,
+    /// Market views, the calendar and news; `None` when `[market] enabled = false`.
+    market: Option<Arc<MarketService>>,
 }
 
 /// The window of the per-session request budgets.
@@ -263,6 +273,7 @@ const REQUEST_RATE_WINDOW_MS: i64 = 60_000;
 pub enum Budget {
     Chat,
     Transcribe,
+    Market,
 }
 
 /// Cheap to clone; shared by every request handler.
@@ -346,8 +357,24 @@ impl AppState {
             events: events.clone(),
             broker: broker.clone(),
         });
-        let tools = ToolRegistry::new(bridge.clone(), resolver.clone(), clock.clone())
+        let market = config.market.enabled.then(|| {
+            let news = overrides.news.unwrap_or_else(|| {
+                news_from_config(&config.market.news, |name| std::env::var(name).ok())
+            });
+            MarketService::new(MarketParts {
+                bridge: bridge.clone(),
+                clock: clock.clone(),
+                news,
+                audit: audit.clone(),
+                config: config.market.clone(),
+            })
+        });
+        let mut tools = ToolRegistry::new(bridge.clone(), resolver.clone(), clock.clone())
             .with_trading(trading.clone());
+        if let Some(market) = &market {
+            tools = tools.with_market(market.clone());
+        }
+        let market_per_minute = config.market.rate_limit_per_minute;
         let agent = Agent::new(tools, audit.clone(), clock.clone());
         Self(Arc::new(Inner {
             config,
@@ -370,6 +397,8 @@ impl AppState {
             ws_slots: Arc::new(Semaphore::new(MAX_SOCKETS)),
             chat_limiter: RateLimiter::new(chat_per_minute, REQUEST_RATE_WINDOW_MS),
             transcribe_limiter: RateLimiter::new(transcribe_per_minute, REQUEST_RATE_WINDOW_MS),
+            market_limiter: RateLimiter::new(market_per_minute, REQUEST_RATE_WINDOW_MS),
+            market,
         }))
     }
 
@@ -505,6 +534,21 @@ impl AppState {
     }
     pub fn trading(&self) -> &Arc<Trading> {
         &self.0.trading
+    }
+    /// Market views, the calendar and news; `None` when they are turned off.
+    pub fn market(&self) -> Option<&Arc<MarketService>> {
+        self.0.market.as_ref()
+    }
+    /// `market` object of `GET /api/status`.
+    pub fn market_status(&self) -> Value {
+        match &self.0.market {
+            Some(m) => json!({
+                "enabled": true,
+                "news_provider": m.news_provider().unwrap_or("none"),
+                "news_configured": m.news_configured(),
+            }),
+            None => json!({ "enabled": false, "news_provider": "none", "news_configured": false }),
+        }
     }
     /// Server events (kill switch, trade results). The WebSocket route subscribes here.
     pub fn events(&self) -> &EventBus {
@@ -722,6 +766,7 @@ impl AppState {
         match budget {
             Budget::Chat => self.0.chat_limiter.check(key, now),
             Budget::Transcribe => self.0.transcribe_limiter.check(key, now),
+            Budget::Market => self.0.market_limiter.check(key, now),
         }
     }
 
@@ -781,11 +826,39 @@ impl AppState {
                 let now = trading.now_ms();
                 state.0.chat_limiter.purge(now);
                 state.0.transcribe_limiter.purge(now);
+                state.0.market_limiter.purge(now);
                 if let Some(auth) = &auth {
                     auth.purge().await;
                 }
             }
         })
+    }
+
+    /// Start the task that scores the market views every [`MARKET_EVALUATE_EVERY`]: open views
+    /// against the M5 bars since they were made. It runs once at start-up (to catch up after
+    /// a restart) and stops when the server shuts down. `None` when market views are off.
+    pub fn spawn_market_evaluator(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let market = self.0.market.clone()?;
+        let mut stop = self.0.shutdown.subscribe();
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(MARKET_EVALUATE_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let report = market.evaluate_open().await;
+                        if report.updated > 0 {
+                            tracing::info!(
+                                checked = report.checked,
+                                updated = report.updated,
+                                "market views scored"
+                            );
+                        }
+                    }
+                    _ = stop.changed() => break,
+                }
+            }
+        }))
     }
 
     /// Startup check (rule 7 / A10). Refuses to start when DEMO is configured against a real
@@ -814,5 +887,116 @@ impl AppState {
             ),
         }
         Ok(())
+    }
+}
+
+/// The news service for `[market.news]`. `env` reads an environment variable. A provider whose
+/// key is missing runs as "not configured" and says so in the log; the key itself is never
+/// logged.
+pub fn news_from_config(
+    cfg: &MarketNewsConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> NewsService {
+    if cfg.provider == NewsProviderKind::None {
+        return NewsService::disabled();
+    }
+    let Some(var) = cfg.key_env() else {
+        return NewsService::disabled();
+    };
+    let key = env(var).map(|k| k.trim().to_owned()).unwrap_or_default();
+    if key.is_empty() {
+        tracing::warn!(
+            provider = cfg.provider.as_str(),
+            "the news provider is configured but {var} is empty or not set; news is off"
+        );
+        return NewsService::disabled();
+    }
+    let ttl = Duration::from_secs(cfg.cache_minutes * 60);
+    let provider: Result<Box<dyn jarvis_news::NewsProvider>, _> = match cfg.provider {
+        NewsProviderKind::None => return NewsService::disabled(),
+        NewsProviderKind::Finnhub => Finnhub::new(&key).map(|p| Box::new(p) as _),
+        NewsProviderKind::Alphavantage => AlphaVantage::new(&key).map(|p| Box::new(p) as _),
+    };
+    match provider {
+        Ok(p) => {
+            tracing::info!(provider = cfg.provider.as_str(), "news provider ready");
+            NewsService::new(p).with_ttl(ttl)
+        }
+        Err(e) => {
+            tracing::warn!(
+                provider = cfg.provider.as_str(),
+                "the news provider is unusable ({e}); news is off"
+            );
+            NewsService::disabled()
+        }
+    }
+}
+
+#[cfg(test)]
+mod news_config_tests {
+    use super::*;
+
+    fn cfg(provider: NewsProviderKind, env: Option<&str>) -> MarketNewsConfig {
+        MarketNewsConfig {
+            provider,
+            api_key_env: env.map(str::to_owned),
+            cache_minutes: 10,
+        }
+    }
+
+    fn env_with(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn no_provider_means_no_news_whatever_the_key_variable_says() {
+        let news = news_from_config(
+            &cfg(NewsProviderKind::None, Some("FINNHUB_API_KEY")),
+            env_with(&[("FINNHUB_API_KEY", "abc")]),
+        );
+        assert!(!news.is_configured());
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_a_key_runs_as_not_configured() {
+        let none = news_from_config(&cfg(NewsProviderKind::Finnhub, None), env_with(&[]));
+        assert!(!none.is_configured());
+        let empty = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, None),
+            env_with(&[("FINNHUB_API_KEY", "")]),
+        );
+        assert!(!empty.is_configured());
+        let blank = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, None),
+            env_with(&[("FINNHUB_API_KEY", "   ")]),
+        );
+        assert!(!blank.is_configured());
+        assert_eq!(blank.provider_name(), None);
+    }
+
+    #[tokio::test]
+    async fn a_provider_with_a_key_is_configured_and_each_has_its_own_variable() {
+        let env = env_with(&[
+            ("FINNHUB_API_KEY", "fh-key"),
+            ("ALPHAVANTAGE_API_KEY", "av-key"),
+            ("MY_NEWS_KEY", "mine"),
+        ]);
+        let finnhub = news_from_config(&cfg(NewsProviderKind::Finnhub, None), &env);
+        assert_eq!(finnhub.provider_name(), Some("finnhub"));
+        let alpha = news_from_config(&cfg(NewsProviderKind::Alphavantage, None), &env);
+        assert_eq!(alpha.provider_name(), Some("alphavantage"));
+        let custom = news_from_config(&cfg(NewsProviderKind::Finnhub, Some("MY_NEWS_KEY")), &env);
+        assert!(custom.is_configured());
+        // The named variable is the one read: the usual one is ignored.
+        let wrong = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, Some("OTHER")),
+            env_with(&[("FINNHUB_API_KEY", "fh-key")]),
+        );
+        assert!(!wrong.is_configured());
     }
 }

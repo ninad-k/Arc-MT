@@ -362,7 +362,7 @@ async fn both_personas_get_the_identical_shared_rules() {
             "NEVER say or imply that a trade was placed",
             "Never invent a volume",
             "name the limit and its value",
-            "You are not a financial adviser",
+            "computed analysis and not a guarantee",
         ] {
             assert!(prompt.contains(rule), "{rule} missing");
         }
