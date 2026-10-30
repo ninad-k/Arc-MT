@@ -66,7 +66,8 @@ export function assertWritable(): void {
 type Action =
 	| { kind: 'close'; items: { ticket: number; volume: number | null }[] }
 	| { kind: 'cancel_orders'; tickets: number[] }
-	| { kind: 'open'; symbol: string; side: Side; volume: number; sl: number | null; tp: number | null };
+	| { kind: 'open'; symbol: string; side: Side; volume: number; sl: number | null; tp: number | null }
+	| { kind: 'place_limit'; symbol: string; side: Side; volume: number; price: number; sl: number | null; tp: number | null };
 
 interface Tok {
 	token: string;
@@ -221,18 +222,24 @@ export function cancelOrdersPreview(tickets: number[], voice = false): PreviewDt
 	);
 }
 
+/** The gate checks every new order shares: an allowed symbol and a volume within max_lot. */
+function checkOpen(symbol: string, volume: number) {
+	const s = symInfo(symbol);
+	const limits = effectiveLimits();
+	if (!s || !limits.allowed_symbols.includes(symbol))
+		throw new ApiError('gate_rejected', `symbol ${symbol} is not allowed`, 422);
+	if (volume > limits.max_lot) {
+		const lot = Number.isInteger(limits.max_lot) ? limits.max_lot.toFixed(1) : String(limits.max_lot);
+		throw new ApiError('gate_rejected', `volume ${volume} exceeds max_lot ${lot}`, 422);
+	}
+	return s;
+}
+
 export function openPreview(
 	o: { symbol: string; side: Side; volume: number; sl: number | null; tp: number | null },
 	voice: boolean
 ): PreviewDto {
-	const s = symInfo(o.symbol);
-	const limits = effectiveLimits();
-	if (!s || !limits.allowed_symbols.includes(o.symbol))
-		throw new ApiError('gate_rejected', `symbol ${o.symbol} is not allowed`, 422);
-	if (o.volume > limits.max_lot) {
-		const lot = Number.isInteger(limits.max_lot) ? limits.max_lot.toFixed(1) : String(limits.max_lot);
-		throw new ApiError('gate_rejected', `volume ${o.volume} exceeds max_lot ${lot}`, 422);
-	}
+	const s = checkOpen(o.symbol, o.volume);
 	const entry = fillPrice(o.symbol, o.side);
 	const dir = o.side === 'buy' ? 1 : -1;
 	const pl = (price: number) => {
@@ -262,6 +269,44 @@ export function openPreview(
 	);
 }
 
+/** A limit order at a chosen price (Prepare trade from a market view). */
+export function limitPreview(o: {
+	symbol: string;
+	side: Side;
+	volume: number;
+	price: number;
+	sl: number | null;
+	tp: number | null;
+}): PreviewDto {
+	const s = checkOpen(o.symbol, o.volume);
+	const dir = o.side === 'buy' ? 1 : -1;
+	const pl = (price: number) => {
+		const raw = (price - o.price) * dir * o.volume * s.contract;
+		return round(o.symbol === 'USDJPY' ? raw / price : raw, 2);
+	};
+	const warnings: string[] = [];
+	if (o.sl === null) warnings.push('No stop loss set');
+	return issue(
+		{
+			id: crypto.randomUUID(),
+			description: `${o.side === 'buy' ? 'Buy' : 'Sell'} limit ${o.volume.toFixed(2)} ${o.symbol} @ ${o.price.toFixed(s.digits)}${o.sl !== null ? `, SL ${o.sl}` : ''}${o.tp !== null ? `, TP ${o.tp}` : ''}`,
+			symbols: [o.symbol],
+			tickets: [],
+			total_volume: o.volume,
+			est_pnl: {
+				current: null,
+				at_sl: o.sl !== null ? pl(o.sl) : null,
+				at_tp: o.tp !== null ? pl(o.tp) : null
+			},
+			is_batch: false,
+			count: 1,
+			warnings
+		},
+		{ kind: 'place_limit', ...o },
+		false
+	);
+}
+
 // ---- Confirmation --------------------------------------------------------
 
 const OK = { retcode: 10009, retcode_description: 'Request executed' };
@@ -282,6 +327,22 @@ function execute(a: Action): TradeResult[] {
 			time: Math.floor(Date.now() / 1000)
 		});
 		return [{ ticket, ok: true, ...OK, order: ticket + 1, deal: ticket + 2, price, volume: a.volume, error: null }];
+	}
+	if (a.kind === 'place_limit') {
+		const ticket = newTicket();
+		pending.push({
+			ticket,
+			symbol: a.symbol,
+			type: a.side === 'buy' ? 'buy_limit' : 'sell_limit',
+			volume_initial: a.volume,
+			volume_current: a.volume,
+			price_open: a.price,
+			sl: a.sl,
+			tp: a.tp,
+			time_setup: Math.floor(Date.now() / 1000),
+			comment: ''
+		});
+		return [{ ticket, ok: true, ...OK, order: ticket, deal: null, price: a.price, volume: a.volume, error: null }];
 	}
 	if (a.kind === 'cancel_orders') {
 		return a.tickets.map((ticket) => {

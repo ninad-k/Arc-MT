@@ -16,8 +16,10 @@
  *   ?mock=ttl=4         confirmation window of 4 s instead of 15 s
  *   ?mock=reset         forget the remembered switches
  *
+ * Market view: `?mock=viewttl=5` makes a view valid for 5 s instead of 4 h (shows the expired state).
+ *
  * Chat: "close gold", "close all", "close buys", "close half of gold", "buy 0.1 gold sl 2300",
- * "cancel my pending orders". Messages containing "fail" return an llm_error.
+ * "cancel my pending orders", "what is your view on gold", "any events today", "gold news". Messages containing "fail" return an llm_error.
  * Voice: the mock transcriber returns a scripted phrase; `window.__jarvisMock.say("...")` sets it.
  * Hands-free (`/api/voice/transcribe?wake=1`): script "hey friday what's gold at" and the reply carries
  * `wake` (and switches the persona); without a script the segment is ignored background speech.
@@ -81,6 +83,13 @@ import {
 	toCanonical,
 	withBrokerSymbol
 } from './mock-symbols';
+import {
+	getMarketCalendar,
+	getMarketJournal,
+	getMarketNews,
+	getMarketView,
+	prepareFromView
+} from './mock-market-view';
 import { toneWav, wavDurationMs } from './voice/wav';
 
 export { onMockEvent };
@@ -321,6 +330,31 @@ function chat(req: ChatRequest): ChatResponse {
 		preview = proposed.preview;
 		tool_calls.push(proposed.call);
 		reply = `Here is what I'd do: ${preview.description}. Please review and confirm within the time shown.`;
+	} else if (/\b(view|outlook|analysis|analy[sz]e|bias)\b/.test(text)) {
+		const symbol = symbolFromText(text) ?? 'XAUUSD';
+		const v = getMarketView(`/api/market/view?symbol=${symbol}`);
+		tool_calls.push({ name: 'get_market_view', arguments: { symbol }, ok: true, duration_ms: 420 });
+		const lead = `${symbol}: ${v.bias} bias, confidence ${v.confidence} of 100.`;
+		const tail = v.stand_aside
+			? `Stand aside: ${v.stand_aside_reason}.`
+			: v.setup
+				? `Entry zone ${v.setup.entry_low} to ${v.setup.entry_high}, stop ${v.setup.stop_loss}, first target ${v.setup.take_profit}.`
+				: 'No setup right now.';
+		reply = `${lead} ${tail} This is a computed analysis, not a guarantee.`;
+	} else if (/\bcalendar\b|\bevents?\b/.test(text)) {
+		const { events } = getMarketCalendar('/api/market/calendar?hours=24');
+		tool_calls.push({ name: 'get_economic_calendar', arguments: { hours_ahead: 24 }, ok: true, duration_ms: 140 });
+		const next = events.find((e) => e.minutes_away >= 0);
+		reply = next
+			? `${events.length} events in the next day. The next one is ${next.title} (${next.currency}) in ${next.minutes_away} minutes.`
+			: 'No events in the next day.';
+	} else if (/\bnews\b|\bheadlines?\b/.test(text)) {
+		const symbol = symbolFromText(text) ?? 'XAUUSD';
+		const n = getMarketNews(`/api/market/news?symbol=${symbol}`);
+		tool_calls.push({ name: 'get_news', arguments: { symbol }, ok: true, duration_ms: 310 });
+		reply = n.summary
+			? `News tone for ${symbol} is ${n.summary.label} across ${n.summary.count} headlines.`
+			: `News is not configured, so there is no headline tone for ${symbol}.`;
 	} else if (/gold|xau|price|eur|jpy|btc|nas/.test(text)) {
 		const symbol = symbolFromText(text) ?? 'XAUUSD';
 		const t = tick().find((p) => p.symbol === symbol)!;
@@ -531,6 +565,18 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	if ((m = path.match(/^\/api\/orders\/(\d+)\/cancel$/))) {
 		assertWritable();
 		return cancelOrdersPreview([Number(m[1])]) as T;
+	}
+
+	if (path.startsWith('/api/market/')) {
+		const route = path.split('?')[0];
+		if (route === '/api/market/view') {
+			await sleep(600, opts.signal);
+			return getMarketView(path) as T;
+		}
+		if (route === '/api/market/calendar') return getMarketCalendar(path) as T;
+		if (route === '/api/market/news') return getMarketNews(path) as T;
+		if (route === '/api/market/journal') return getMarketJournal(path) as T;
+		if (route === '/api/market/prepare' && opts.method === 'POST') return prepareFromView(opts.body) as T;
 	}
 
 	if (path === '/api/audit' || path.startsWith('/api/audit?')) return audit(path) as T;

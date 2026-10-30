@@ -5,6 +5,7 @@
 	import Watchlist from '#lib/components/Watchlist.svelte';
 	import AccountStrip from '#lib/components/AccountStrip.svelte';
 	import Positions from '#lib/components/Positions.svelte';
+	import MarketView from '#lib/components/MarketView.svelte';
 	import Panel from '#lib/components/Panel.svelte';
 	import Transcript from '#lib/components/Transcript.svelte';
 	import Composer from '#lib/components/Composer.svelte';
@@ -19,7 +20,7 @@
 	import { attachPushToTalk } from '#lib/state/voice.svelte.ts';
 	import { persona } from '#lib/state/persona.svelte.ts';
 
-	type Tab = 'chat' | 'watchlist' | 'positions';
+	type Tab = 'chat' | 'watchlist' | 'positions' | 'market';
 	let tab = $state<Tab>('chat');
 
 	onMount(() => {
@@ -37,8 +38,13 @@
 	const tabs = $derived([
 		{ id: 'chat' as const, label: 'Chat' },
 		{ id: 'watchlist' as const, label: 'Watchlist', badge: watchlist.data ? String(watchlist.data.prices.length) : undefined },
-		{ id: 'positions' as const, label: 'Positions', badge: positions.data ? String(positions.data.length) : undefined }
+		{ id: 'positions' as const, label: 'Positions', badge: positions.data ? String(positions.data.length) : undefined },
+		{ id: 'market' as const, label: 'Market' }
 	]);
+
+	// From lg up the three columns are always visible; the middle one shows either the chat (under
+	// the orb) or the market view, which takes the whole column because it is tall.
+	const center = $derived(tab === 'market' ? 'market' : 'chat');
 
 	// Below lg only the selected tab's panel is shown; at lg everything is visible.
 	const show = (t: Tab) => (tab === t ? '' : 'max-lg:hidden');
@@ -53,7 +59,7 @@
 		class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:grid-cols-[18rem_minmax(0,1fr)_19rem] xl:grid-cols-[19rem_minmax(0,1fr)_24rem] lg:grid-rows-[minmax(14rem,1fr)_minmax(18rem,1.15fr)] lg:gap-4"
 	>
 		<!-- Orb -->
-		<div class="h-[clamp(9rem,24dvh,15rem)] min-h-0 md:h-[clamp(12rem,30dvh,22rem)] lg:col-start-2 lg:row-start-1 lg:h-auto">
+		<div class="h-[clamp(9rem,24dvh,15rem)] min-h-0 md:h-[clamp(12rem,30dvh,22rem)] lg:col-start-2 lg:row-start-1 lg:h-auto {tab === 'market' ? 'max-md:h-[6rem]' : ''} {center === 'market' ? 'lg:hidden' : ''}">
 			<Orb />
 		</div>
 
@@ -74,13 +80,20 @@
 			id="panel-chat"
 			role="tabpanel"
 			aria-labelledby="tab-chat"
-			class="min-h-0 lg:col-start-2 lg:row-start-2 {show('chat')}"
+			class="min-h-0 lg:col-start-2 lg:row-start-2 {center === 'market' ? 'lg:hidden' : ''} {show('chat')}"
 		>
 			<Panel title="Transcript" class="h-full" scroll={false}>
 				{#snippet meta()}
 					{#if chat.sessionId}
 						<span title="Session {chat.sessionId}">session {chat.sessionId.slice(0, 8)}</span>
 					{/if}
+					<button
+						type="button"
+						class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink max-lg:hidden"
+						onclick={() => (tab = 'market')}
+					>
+						Market view
+					</button>
 					{#if chat.messages.length > 0}
 						<button
 							type="button"
@@ -95,6 +108,16 @@
 				<Transcript />
 				<Composer />
 			</Panel>
+		</div>
+
+		<!-- Market view -->
+		<div
+			id="panel-market"
+			role="tabpanel"
+			aria-labelledby="tab-market"
+			class="min-h-0 lg:col-start-2 lg:row-span-2 lg:row-start-1 {center === 'market' ? '' : 'lg:hidden'} {show('market')}"
+		>
+			<MarketView onclose={() => (tab = 'chat')} />
 		</div>
 
 		<!-- Account + positions -->

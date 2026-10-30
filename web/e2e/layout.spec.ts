@@ -85,3 +85,46 @@ test('the top bar with the persona toggle fits at 375 px', async ({ page }) => {
 	w = await widths(page);
 	expect(w.scroll).toBeLessThanOrEqual(w.client);
 });
+
+test('the Market view panel fits at 375 px, with a card, the track record and the dialog', async ({ page }) => {
+	await page.goto('/?mock=reset');
+	await expect(page.getByRole('tab', { name: /Positions/ })).toContainText('5');
+	await page.getByRole('tab', { name: 'Market', exact: true }).click();
+	const panel = page.getByRole('region', { name: 'Market view' });
+	await expect(panel).toBeVisible();
+	let w = await widths(page);
+	expect(w.scroll).toBeLessThanOrEqual(w.client);
+
+	// The four tabs fit in the bar.
+	const bar = await page.getByRole('tablist', { name: 'Panels' }).boundingBox();
+	expect(bar!.x + bar!.width).toBeLessThanOrEqual(375);
+
+	await panel.getByLabel('Symbol', { exact: true }).fill('XAUUSD');
+	await panel.getByRole('button', { name: 'Analyze', exact: true }).click();
+	await expect(page.getByTestId('market-card')).toBeVisible();
+	w = await widths(page);
+	expect(w.scroll).toBeLessThanOrEqual(w.client);
+	expect(w.body).toBeLessThanOrEqual(w.client);
+	// Nothing inside the card is wider than the screen either.
+	const wide = await page.getByTestId('market-card').evaluate((card) =>
+		[...card.querySelectorAll('*')]
+			.filter((e) => e.getBoundingClientRect().right > document.documentElement.clientWidth + 0.5)
+			.map((e) => e.tagName + '.' + e.className)
+	);
+	expect(wide).toEqual([]);
+
+	await panel.getByRole('button', { name: 'Prepare trade' }).scrollIntoViewIfNeeded();
+	await panel.getByRole('button', { name: 'Prepare trade' }).click();
+	const dlg = page.getByTestId('prepare-dialog');
+	await expect(dlg).toBeVisible();
+	const box = await dlg.boundingBox();
+	expect(box!.x).toBeGreaterThanOrEqual(0);
+	expect(box!.x + box!.width).toBeLessThanOrEqual(375);
+	await page.keyboard.press('Escape');
+
+	await panel.getByRole('tab', { name: 'Track record' }).click();
+	await expect(page.getByTestId('journal-row').first()).toBeVisible();
+	w = await widths(page);
+	expect(w.scroll).toBeLessThanOrEqual(w.client);
+	expect(w.body).toBeLessThanOrEqual(w.client);
+});

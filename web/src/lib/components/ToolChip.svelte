@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ToolCall } from '#lib/api.ts';
 	import { summarizeArgs } from '#lib/format.ts';
+	import { toolLabel } from '#lib/market.ts';
 
 	let { call }: { call: ToolCall } = $props();
 
@@ -17,7 +18,7 @@
 	title={full}
 >
 	<span aria-hidden="true" class={call.ok ? 't-up' : ''}>{call.ok ? '✓' : '✕'}</span>
-	<span class="font-medium {call.ok ? 'text-accent' : ''}">{call.name}</span>
+	<span class="font-medium {call.ok ? 'text-accent' : ''}">{toolLabel(call.name)}</span>
 	{#if args}<span class="truncate opacity-80">({args})</span>{/if}
 	<span class="shrink-0 opacity-70">{call.duration_ms} ms</span>
 	<span class="sr-only">{call.ok ? 'succeeded' : 'failed'}</span>

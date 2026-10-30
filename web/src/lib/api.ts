@@ -438,6 +438,189 @@ export interface SymbolMapBody {
 	totp?: string;
 }
 
+// ---- Market view (docs/api.md "Market view"; tasks/spec-market-view.md section 4) -------------
+
+export type Bias = 'bullish' | 'bearish' | 'neutral';
+export type EventImportance = 'low' | 'moderate' | 'high';
+
+export interface MarketSetup {
+	side: Side;
+	entry_low: number;
+	entry_high: number;
+	stop_loss: number;
+	/** TP1. */
+	take_profit: number;
+	take_profit_2: number | null;
+	risk_reward: number;
+	atr_h1: number;
+	atr_m15: number;
+}
+
+export interface MarketTimeframe {
+	/** M5, M15, H1, H4 or D1. */
+	timeframe: string;
+	/** `up`, `down` or anything else for flat. */
+	trend: string;
+	ema20: number;
+	ema50: number;
+	rsi: number;
+	macd_hist: number;
+	atr: number;
+}
+
+export interface MarketLevels {
+	pivot: number | null;
+	r1: number | null;
+	r2: number | null;
+	s1: number | null;
+	s2: number | null;
+	prev_day_high: number | null;
+	prev_day_low: number | null;
+	vwap: number | null;
+	support: number[];
+	resistance: number[];
+}
+
+export interface MarketFactor {
+	name: string;
+	signal: string;
+	/** Signed points this factor added to the score. */
+	points: number;
+	detail: string;
+}
+
+export interface MarketEvent {
+	/** ISO UTC. */
+	time: string;
+	/** Whole minutes from the moment the view was made; negative once it has passed. */
+	minutes_away: number;
+	currency: string;
+	title: string;
+	importance: EventImportance;
+	/** The calendar endpoint may add the figures; the view leaves them out. */
+	actual?: number | null;
+	forecast?: number | null;
+	previous?: number | null;
+	unit?: string | null;
+}
+
+export interface MarketHeadline {
+	title: string;
+	source: string;
+	url: string;
+	/** ISO UTC. */
+	published_at: string;
+	/** -1 to 1, already in the instrument's direction. */
+	tone: number;
+}
+
+export interface MarketNews {
+	configured: boolean;
+	score: number | null;
+	label: string | null;
+	count: number;
+	headlines: MarketHeadline[];
+}
+
+export interface MarketViewDto {
+	id: string;
+	/** The canonical name (`XAUUSD`). */
+	symbol: string;
+	/** The broker's own name for it (`XAUUSD_`). */
+	broker_symbol: string;
+	/** ISO UTC. */
+	generated_at: string;
+	valid_until: string;
+	price: { bid: number; ask: number };
+	bias: Bias;
+	/** 0 to 100. */
+	confidence: number;
+	score: number;
+	stand_aside: boolean;
+	stand_aside_reason: string | null;
+	setup: MarketSetup | null;
+	timeframes: MarketTimeframe[];
+	levels: MarketLevels;
+	factors: MarketFactor[];
+	events: MarketEvent[];
+	news: MarketNews;
+	summary: string;
+	disclaimer: string;
+	/** Price decimals. Not in the spec; the UI uses it when the server sends it and infers it otherwise. */
+	digits?: number;
+}
+
+export interface MarketCalendarResponse {
+	events: MarketEvent[];
+}
+
+export interface MarketNewsSummary {
+	score: number;
+	label: string;
+	count: number;
+	headlines: MarketHeadline[];
+}
+
+export interface MarketNewsResponse {
+	configured: boolean;
+	provider: string | null;
+	summary: MarketNewsSummary | null;
+}
+
+export type MarketOutcome = 'open' | 'tp_hit' | 'sl_hit' | 'expired' | 'no_setup';
+
+/**
+ * Counts over every stored view. The spec lists only "totals per outcome, TP rate among setups,
+ * bias accuracy", so every field is optional here and the UI works from the counts.
+ */
+export interface MarketJournalStats {
+	total?: number;
+	open?: number;
+	tp_hit?: number;
+	sl_hit?: number;
+	expired?: number;
+	no_setup?: number;
+	/** Views whose bias was scored, split by the verdict. */
+	bias_correct?: number;
+	bias_wrong?: number;
+}
+
+export interface MarketJournalView {
+	id: string;
+	/** ISO UTC. */
+	created_at: string;
+	symbol: string;
+	broker_symbol?: string;
+	bias: Bias;
+	confidence: number;
+	score?: number;
+	stand_aside: boolean;
+	side: Side | null;
+	entry: number | null;
+	stop: number | null;
+	tp: number | null;
+	price: number;
+	valid_until: string;
+	outcome: MarketOutcome;
+	evaluated_at: string | null;
+	bias_correct: boolean | null;
+	/** The move at `valid_until` in ATR(H1) units, signed in the bias direction. */
+	move_atr: number | null;
+}
+
+export interface MarketJournalResponse {
+	stats: MarketJournalStats;
+	views: MarketJournalView[];
+}
+
+export type MarketOrderType = 'market' | 'limit';
+
+export interface MarketPrepareBody {
+	view_id: string;
+	volume: number;
+	order_type: MarketOrderType;
+}
+
 /** Events pushed over `GET /api/ws`. */
 export type WsEvent =
 	| { type: 'kill_switch'; engaged: boolean; reason: string | null }
@@ -629,5 +812,29 @@ export const api = {
 	/** A wrong TOTP code is a 401 that is an answer, not a lost session. */
 	setSymbolMap: (body: SymbolMapBody) => put<unknown>('/api/symbols/map', body, { keepOn401: true }),
 	/** The effective map as a JSON file. */
-	exportSymbols: () => request<Blob>('/api/symbols/export', { asBlob: true })
+	exportSymbols: () => request<Blob>('/api/symbols/export', { asBlob: true }),
+
+	/** The server reads rates, the calendar and news before it answers, so allow for a slow broker. */
+	marketView: (symbol: string, signal?: AbortSignal) =>
+		request<MarketViewDto>(`/api/market/view?${new URLSearchParams({ symbol })}`, {
+			signal,
+			timeoutMs: 45_000
+		}),
+	marketCalendar: (opts: { hours?: number; currencies?: string[] } = {}, signal?: AbortSignal) => {
+		const q = new URLSearchParams({ hours: String(opts.hours ?? 24) });
+		if (opts.currencies?.length) q.set('currencies', opts.currencies.join(','));
+		return request<MarketCalendarResponse>(`/api/market/calendar?${q}`, { signal });
+	},
+	marketNews: (symbol: string, signal?: AbortSignal) =>
+		request<MarketNewsResponse>(`/api/market/news?${new URLSearchParams({ symbol })}`, {
+			signal,
+			timeoutMs: 20_000
+		}),
+	marketJournal: (opts: { limit?: number; symbol?: string } = {}, signal?: AbortSignal) => {
+		const q = new URLSearchParams({ limit: String(opts.limit ?? 20) });
+		if (opts.symbol) q.set('symbol', opts.symbol);
+		return request<MarketJournalResponse>(`/api/market/journal?${q}`, { signal });
+	},
+	/** Turns a view into the usual preview. It never confirms: the confirmation modal does that. */
+	marketPrepare: (body: MarketPrepareBody) => post<PreviewDto>('/api/market/prepare', body)
 };
