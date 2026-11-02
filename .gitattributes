@@ -9,6 +9,11 @@
 *.bat  text eol=crlf
 *.cmd  text eol=crlf
 
+# Vendored headers saved as UTF-16LE: line-ending conversion works on bytes and corrupts
+# them (MetaEditor then fails with "identifier is too long"). Keep their bytes exactly.
+mql5/Include/Zmq/Zmq.mqh        -text
+mql5/Include/Mql/Lang/Error.mqh -text
+
 # Scripts that run on Linux runners or in Git Bash must keep LF.
 *.sh   text eol=lf
 
