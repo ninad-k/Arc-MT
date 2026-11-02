@@ -1,0 +1,357 @@
+# Configuration
+
+Arc MT reads two places at startup:
+
+- **`config/jarvis.toml`**: non-secret settings. It is gitignored, so start from the template:
+  `Copy-Item config\jarvis.example.toml config\jarvis.toml`.
+- **`.env`**: secrets and the log level. It is loaded from the working directory and is gitignored.
+  Start from `Copy-Item .env.example .env`.
+
+Changes take effect after a restart of `jarvis-api`. The web UI is read from `static_dir` at startup, and
+the server hashes its inline scripts once, so rebuild the web UI and restart after each change.
+
+## Which file is used
+
+1. The `--config <file>` flag (also accepted after the subcommand, for example `jarvis-api user list -c <file>`).
+2. Otherwise the `JARVIS_CONFIG` environment variable.
+3. Otherwise `config/jarvis.toml`, relative to the working directory. Start from the repository root, or
+   set `JARVIS_CONFIG` to an absolute path. The Windows service always gets an absolute `--config` path.
+
+A missing file stops the server with a message that tells you to copy the example.
+
+## Startup validation
+
+The server refuses to start, and says why, when:
+
+- `mode` is not `demo` or `live`, or the account reports a real trade mode while `mode = "demo"`.
+- `bridge.endpoint` is not `tcp://` on a loopback host (`127.0.0.1`, `::1` or `localhost`).
+- There is no usable bridge key: neither `JARVIS_BRIDGE_KEY` nor `bridge.key_file` is set, the file cannot be read, or the key is not 64 hexadecimal characters (and not all zeros). The message points at `scripts/install-ea.ps1`. The key is never printed.
+- `server.bind` is not loopback and TLS (`tls_cert` and `tls_key`) and `[auth] enabled = true` are not both set.
+- Only one of `tls_cert` and `tls_key` is set, or a PEM file cannot be read.
+- `[auth] enabled = true` and `JARVIS_JWT_SECRET` is missing, shorter than 32 bytes, or guessable: fewer than 16 different byte values, a run of 8 equal bytes, or a block that repeats (`abcdabcd...`). Base64 or hex text is judged on the bytes it decodes to. The message prints the command that generates a good one (the same as in `.env.example`).
+- `llm.providers` is empty, two providers share a name, or `llm.default` names no provider.
+- `[trading]` or `[limits]` values are out of range (see below).
+- The persona folder in `[personas] dir` cannot be read, holds no valid persona pack, has two packs with the same `id`, or `[personas] default` names no pack. A pack that breaks a rule in [Persona packs](#persona-packs) is reported by file name.
+
+A bridge that is down, a missing voice model, or a missing LLM key only logs a warning. The server still starts.
+
+## `mode`
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `mode` | `"demo"` or `"live"` | `"demo"` | Operating mode. In `demo`, startup fails when the MT5 account is real, and chat returns `409 mode_mismatch` if the account changes to real while the server runs. `live` is accepted only when you set it on purpose, and the web UI then shows a LIVE banner. |
+
+Safety: keep `demo` for every test. Do not change `mode` to get past a `mode_mismatch`. Log MT5 into the demo account instead.
+
+## `[server]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `bind` | `host:port` | `"127.0.0.1:8787"` | Address the HTTP and WebSocket server listens on. Any non-loopback address needs TLS and login (see startup validation). Use `0.0.0.0:8787` only with TLS, login and a firewall rule. |
+| `static_dir` | path | unset | Folder with the built web UI, usually `"web/build"` (`pnpm -C web build`). The server serves it at `/` and falls back to `index.html` for client-side routes. Unset means the API only, which suits the Vite dev server. |
+| `tls_cert` | path | unset | PEM certificate chain. Set it with `tls_key` to serve HTTPS and WSS. |
+| `tls_key` | path | unset | PEM private key. It must not be encrypted. Keep it out of Git (the `certs/`, `*.pem` and `*.key` patterns are gitignored). |
+| `dev_origins` | list of origins | `[]` | Browser origins (`"http://localhost:5173"`) allowed to call the API with the session cookie (CORS, and the WebSocket `Origin` check). Empty by default: the web UI is served by the API, and `pnpm -C web dev` goes through the Vite proxy, which is same-origin. Anything listed can drive the whole API, so list only origins you control. Entries are `scheme://host[:port]` with no path or wildcard. |
+| `header_read_timeout_secs` | integer 1 to 120 | `10` | How long a client has to send the headers of a request. It also closes a keep-alive connection that has been idle that long, and the TLS handshake has its own 10 s limit. A client that trickles its headers in cannot hold a connection open (finding NET-1). |
+| `request_timeout_secs` | integer 1 to 600 | `30` | How long a request may take to be answered, an upload of the body included. Applies to every route except the next row and the WebSocket (an open `/api/ws` has no limit; its upgrade is answered at once). A request that runs out gets `408 request_timeout`. |
+| `long_request_timeout_secs` | integer, `request_timeout_secs` to 3600 | `200` | The same for the routes that wait for a language model, the speech engines, a batch of trades or a market view: `/api/chat`, `/api/voice/*`, `/api/confirm/*`, `/api/market/view` and `/api/market/news`. A chat turn can make up to five model calls, so keep this above the `timeout_secs` of your slowest provider; the server logs a warning at startup when a provider is not shorter. A confirmed trade keeps running after its request is stopped. |
+| `max_connections` | integer 1 to 100000 | `256` | Open connections accepted at once, counted before any TLS handshake. Another connection is closed at once, unanswered. Open WebSockets (at most 16) count as connections. |
+| `chat_rate_limit_per_minute` | integer 1 to 10000 | `20` | `POST /api/chat` requests per minute for one login session (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`, and the model is not called (finding NET-2). |
+| `transcribe_rate_limit_per_minute` | integer 1 to 10000 | `20` | The same for `POST /api/voice/transcribe`. |
+
+When TLS is on, responses carry `Strict-Transport-Security`, the session cookie is `Secure`, and the CSP upgrades insecure requests.
+The CSP lets the page connect to its own origin only (`connect-src 'self'`), which covers the WebSocket in Chrome, Edge and Firefox; see [security](security/threat-model.md).
+
+## `[bridge]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `endpoint` | `tcp://<loopback>:<port>` | `"tcp://127.0.0.1:5555"` | Where the API connects to the `JarvisBridge` EA. Must be loopback. Must match the EA input `InpEndpoint`. |
+| `timeout_ms` | integer > 0 | `3000` | Time to wait for each EA reply. A write that times out is not retried and is reported as `outcome_unknown`. Raise it only if replies are slow for a reason you understand. |
+| `key_file` | path | unset | The shared bridge key (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): a text file holding 64 hexadecimal characters, 32 random bytes. `scripts/install-ea.ps1` creates it as `<MT5 data folder>\MQL5\Files\JarvisMT\bridge.key` and prints the path. The EA reads the same file when it starts. Without the key the EA refuses every request, so the API **refuses to start** without one. `JARVIS_BRIDGE_KEY` overrides this setting. Write the path as a TOML literal string (single quotes), for example `key_file = 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\<id>\MQL5\Files\JarvisMT\bridge.key'`. Only your own Windows account should be able to read the file; the MT5 data folder under `%APPDATA%` already is. |
+
+Every message to and from the EA is signed with this key, so any other program on the PC that does not hold it cannot place orders or read the account, and it cannot answer in the EA's place. See [protocol.md](protocol.md#authentication). To change the key, see [Rotating the bridge key](runbook.md#rotating-the-bridge-key).
+
+## `[database]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `url` | SQLite URL | `"sqlite://data/jarvis.db"` | The audit log, users and revoked sessions. Created on first start, with migrations applied at every start. The path is relative to the working directory. The file holds password hashes and encrypted TOTP secrets, so limit who can read it. |
+
+## `[symbols]`
+
+Arc MT uses canonical instrument names (`XAUUSD`, `US100`, ...) everywhere and maps them to each broker's own
+symbols. How the maps are built and reviewed is in [symbol-mapping.md](symbol-mapping.md).
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `instruments` | path | `"config/instruments.toml"` | The canonical instruments, their generic aliases and their description keywords. Read at start-up. A missing or invalid file turns broker mapping off (see [Mapping files](#mapping-files)). |
+| `broker_map` | path | `"config/broker_symbols.toml"` | The curated per-broker maps, checked into the repository. Read at start-up. A missing or invalid file turns broker mapping off. |
+| `data_dir` | path | `"data"` | Folder for the generated map (`broker_symbols.generated.toml`), your overrides from Settings (`broker_symbols.user.toml`) and the catalog snapshots (`broker-catalogs/`). Created when needed. |
+| `auto_detect` | boolean | `true` | `false` turns off detection at start-up and on an account switch. The curated and user maps still apply, and Re-detect in Settings still runs a detection. |
+| `suffix` | string | `""` | Last resort only. Appended to a name while the current broker has no map in any layer, or no broker is known yet. Whitespace is trimmed. Leave it empty when the maps work. |
+| `watchlist` | list of strings | `[]` | Symbols shown in the web watchlist, as canonical names (`"XAUUSD"`). Entries that are empty after trimming are dropped. |
+| `aliases` | table `spoken = "CANONICAL"` | `{}` | Spoken or typed names, such as `gold = "XAUUSD"`. Keys are matched case-insensitively and whitespace is collapsed, so `"Dow  Jones"` matches `"dow jones"`. Values are canonical names; an older broker symbol as a value still works. |
+
+`[limits] allowed_symbols` and the watchlist hold canonical names, and they apply on every broker. A name written
+with the legacy suffix (`EURUSD.m` while `suffix = ".m"`) is read as its canonical name, so `"EURUSD"` is the
+entry to write. The suffix is no longer added to these lists.
+
+Unknown symbols are reported as `unknown symbol`. The API never picks a different symbol for you.
+
+### Mapping files
+
+The mapping files use TOML. Changes take effect after a restart of `jarvis-api`. All of them are read together at start-up:
+if one is malformed, the server still starts, but the maps are off, names pass through with the `suffix`, and detection
+does not run. The reason is in the log.
+
+#### `config/instruments.toml`
+
+```toml
+[[instrument]]
+canonical = "US100"                 # upper case, [A-Z0-9], 2 to 16 characters
+class = "index"                     # fx | metal | index | energy | crypto | other
+aliases = ["NASDAQ", "NAS100", "USTEC"]
+keywords = ["nasdaq 100", "us tech 100"]   # lower-case phrases seen in a broker's description
+```
+
+- An FX canonical name is six letters.
+- Every name (canonical or alias) belongs to one instrument only.
+- Keywords must not be empty. They are used by detection, not for matching what you type.
+
+#### `config/broker_symbols.toml`, `data/broker_symbols.user.toml` and `data/broker_symbols.generated.toml`
+
+All three have the same shape. Each broker is a table keyed by its exact MT5 company name (`ACCOUNT_COMPANY`):
+
+```toml
+[brokers."Example Markets Ltd"]
+note = "Free text: where the names came from and whether they were verified."
+patterns = [{ match = "^([A-Z]{6})$", replace = "${1}.r" }]
+
+[brokers."Example Markets Ltd".explicit]
+XAUUSD = "GOLD.r"        # canonical name or alias = the broker's symbol
+US100 = "NAS100.cash"
+```
+
+- `explicit`: each value is a non-empty broker symbol. The key is a canonical name or an alias.
+- `patterns`: `match` is a regular expression for the whole canonical name (it must compile). `replace` uses `$1`,
+  `${1}` or `\1` for the groups of `match`, and every group it uses must exist.
+- Explicit entries win over patterns, in every layer. Among patterns, the order is user, curated, generated.
+- The user and generated files are written by Arc MT, so edits made to them while it runs are overwritten. Make
+  permanent changes in Settings or in `config/broker_symbols.toml`.
+
+The layers and their precedence are described in [symbol-mapping.md](symbol-mapping.md#the-three-layers).
+
+## `[market]`
+
+Market views: intraday analysis from the broker's bars, the MT5 economic calendar and optional news. How a view is computed is in [market-view.md](market-view.md). The whole section is optional: without it, views are on, with the values shown here and news off. An out-of-range value, an unknown key or a bad `provider` stops the server at startup and says which.
+
+```toml
+[market]
+enabled = true
+horizon_minutes = 240
+event_blackout_minutes = 30
+calendar_min_importance = "moderate"
+rate_limit_per_minute = 30
+
+[market.news]
+provider = "none"            # none | finnhub | alphavantage
+api_key_env = "FINNHUB_API_KEY"
+cache_minutes = 10
+```
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | `false` turns market views off: the `/api/market/*` routes answer `404 not_found`, the three market tools are not offered to the model, and the scoring task does not run. Prices, trading and everything else are unaffected. |
+| `horizon_minutes` | integer 15 to 1440 | `240` | How long a view is valid. After this the view is expired and cannot be used for Prepare trade. The track record scores a view at the end of this time. |
+| `event_blackout_minutes` | integer 0 to 240 | `30` | A view stands aside, with no setup, when a high-impact event for one of the instrument's currencies is this many minutes before or after now. |
+| `calendar_min_importance` | `"low"`, `"moderate"` or `"high"` | `"moderate"` | The lowest importance asked of the MT5 calendar. Events below it are not read. Stand aside uses `high` events, so `"high"` is enough for that rule. The same setting decides which events a view and the calendar list. |
+| `rate_limit_per_minute` | integer 1 to 10000 | `30` | The number of `GET /api/market/view` and `GET /api/market/news` requests one login session may make per minute (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`. |
+
+### `[market.view]` (advanced)
+
+The scoring weights, the bias threshold, the RSI bands and the sizing multipliers (stop 1.0, first target 1.5, second target 2.5 or a swing level, entry zone 0.5, all in ATRs) are the defaults of `ViewConfig` in `crates/market/src/config.rs`. They are listed in [market-view.md](market-view.md#how-the-score-works). An optional `[market.view]` table overrides any of them by the field names of that struct, for example `weight_h4_trend = 25.0`. Keys you leave out keep their defaults, and a value that is not a finite number stops the server at startup.
+
+```toml
+# [market.view]
+# weight_h4_trend = 25.0
+# bias_threshold = 20.0
+```
+
+Leave it out unless you know what you are changing. A changed model no longer matches the documentation, and the track record then scores a different model. `horizon_minutes` and `event_blackout_minutes` in `[market]` win over the same keys in `[market.view]`.
+
+The views need the EA at version 0.5.0 or newer (`get_rates` and `get_calendar`). With an older EA they fail with "unknown command". See [protocol.md](protocol.md#get_rates).
+
+### `[market.news]`
+
+News headlines are optional and off by default. A news key is a secret: it goes in `.env`, never in this file.
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `provider` | `"none"`, `"finnhub"` or `"alphavantage"` | `"none"` | The news source. `none` sends nothing out; the news section of a view says "not configured". |
+| `api_key_env` | env var name | the provider's usual variable | The name of the environment variable that holds the key, in the same way as `api_key_env` for a language model. When left out it is `FINNHUB_API_KEY` for `finnhub` and `ALPHAVANTAGE_API_KEY` for `alphavantage`. It must be a name (letters, digits and underscores): a pasted key is refused at startup. A missing or empty variable logs a warning at startup and runs as "not configured". |
+| `cache_minutes` | integer 1 to 240 | `10` | How long a result is reused per instrument before the provider is called again. Free plans are small, so raise it rather than lower it. |
+
+Where to get a free key, what the cache and the free-plan limits mean, and how tone is scored are in [market-view.md](market-view.md#news). The key is sent only to the provider's own servers over HTTPS, and never appears in logs. See [SECURITY.md](../SECURITY.md).
+
+## `[llm]` and `[[llm.providers]]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `llm.default` | provider name | required | Provider used when a chat request does not name one. Must match a provider `name`. |
+| `name` | string | required | Name used in the UI and in requests. Unique. |
+| `kind` | `"ollama"`, `"anthropic"` or `"openai"` | required | Which API the provider speaks. |
+| `model` | string | required | Model identifier, for example `qwen3.5:9b` for Ollama. |
+| `base_url` | URL | `http://127.0.0.1:11434` (Ollama), `https://api.anthropic.com` (Anthropic), `https://api.openai.com/v1` (OpenAI) | Override the endpoint. |
+| `api_key_env` | env var name | unset | Name of the environment variable that holds the key, for example `"ANTHROPIC_API_KEY"`. Required for `anthropic` and `openai`; ignored for `ollama`. The key itself never goes in the TOML file. A missing variable makes that provider unavailable. |
+| `timeout_secs` | integer | `60` | Per-request timeout for the provider. The example sets `180` for Ollama, because the first reply after a cold start loads the model. |
+| `max_tokens` | integer | `1024` | Upper bound on the reply length. |
+
+Privacy: messages you type and the MT5 data the tools return (prices, positions, deals) are sent to the
+provider. A cloud provider sends them off the PC. Ollama keeps them local. The model never receives login,
+name or server details.
+
+## `[limits]`
+
+These apply before any preview is shown. Without a `[limits]` section nothing can be traded: the gate fails closed.
+When the section is present, `max_lot`, `max_positions`, `max_daily_loss` and `allowed_symbols` are required.
+`trading_hours` is optional.
+
+| Key | Type | Effect and safety |
+|---|---|---|
+| `max_lot` | number > 0 | Largest volume of one **new** order. Closes are never limited by it. |
+| `max_positions` | integer >= 1 | Open positions plus pending orders, counted after the new order. |
+| `max_daily_loss` | number > 0 | In account currency. New orders are blocked once today's realised plus floating P/L is at or below minus this amount. The day starts at server midnight. |
+| `allowed_symbols` | list of strings | Symbols that new orders may use. An empty list blocks all new orders. |
+| `trading_hours.days` | list of `"mon"` to `"sun"` | Days when new orders are allowed. The list must not be empty. |
+| `trading_hours.start`, `end` | `"HH:MM"` | Window in broker server time, start inclusive and end exclusive. They must differ. If `start` is later than `end`, the window crosses midnight. Remove the whole `[limits.trading_hours]` table to allow any time. |
+
+`max_daily_loss`, `trading_hours`, `allowed_symbols` and `max_positions` apply to new orders only. Closing, modifying and
+cancelling stay allowed when those limits are reached, because they reduce or keep risk. The kill switch blocks them too.
+
+## `[trading]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `token_ttl_secs` | 1 to 120 | `15` | How long a confirmation token is valid. Limits and the market are checked again when you confirm, so a preview that has become impossible in those seconds (another preview was confirmed, the loss limit was reached) is refused with `422 gate_rejected`; see [api.md](api.md#previews-and-confirmation-sprint-2). |
+| `voice_token_cap_secs` | integer >= `token_ttl_secs` | `30` | For a voice turn, the window starts when the spoken read-back finishes, and never runs past this many seconds after the preview was made. |
+| `deviation_points` | 0 to 1000 | `20` | Largest slippage allowed for market orders and closes, in points. |
+| `kill_switch_engaged` | boolean | `false` | Start with every write blocked. Independently of this setting, a kill switch that was engaged when the server stopped is saved in the database and stays engaged after a restart until it is released with a login session and a fresh authenticator code. |
+
+## `[auth]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Requires a login session for every `/api` route except health and login. Turn it off only on a loopback-only machine: the server then logs a warning that anyone who can reach it can trade. |
+| `session_hours` | 1 to 168 | `12` | Session lifetime. |
+| `cookie_secure` | boolean | unset | Forces the `Secure` cookie attribute. Unset means `Secure` whenever the server serves TLS itself. Set it to `true` when a reverse proxy terminates TLS in front of a plain-HTTP loopback port. |
+
+The signing secret comes from `JARVIS_JWT_SECRET`, not from this file. See the environment variables below.
+
+## `[voice]`
+
+The whole section is optional. Without it, voice is off. If the section is present, `enabled` defaults to `true`.
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Turns voice on or off. |
+| `whisper_model` | path | required when enabled | Whisper model file, for example `models/whisper/ggml-base.en.bin` (fetched by `scripts/fetch-models.ps1`). Used only by a build with the `whisper` feature. |
+| `language` | string | `"en"` | Language passed to Whisper. |
+| `threads` | integer | `4` | CPU threads for Whisper. |
+| `piper_exe` | path | required when enabled | Piper executable, for example `models/piper/piper.exe`. |
+| `piper_voice` | path | required when enabled | Piper voice model, for example `models/piper/en_US-lessac-medium.onnx`. |
+| `max_seconds` | number greater than 0, at most 120 | `30` | Longest recording accepted for transcription. |
+
+A broken engine does not stop the server. Speech-to-text and text-to-speech are switched off separately, and
+the reason is written to the log. `GET /api/status` reports `voice.stt` and `voice.tts`.
+
+Each persona speaks with the voice named in its own pack (`voice_model`), see [Persona packs](#persona-packs).
+
+## `[personas]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `dir` | path | `"personas"` | Folder that holds the persona packs, relative to the working directory or absolute. Every `*.toml` file directly in it is one persona; subfolders are not read. The folder is read at startup. |
+| `default` | persona id | `"jarvis"` | The persona used by a user who has not chosen one. Must be the `id` of a pack in `dir`. |
+
+A persona changes its name, personality, voice, wake phrase and colours. It never changes the tools, limits, confirmations or safety rules, which are shared by all personas. See [ADR-0017](adr/0017-personas.md).
+
+## Persona packs
+
+Each pack is one TOML file. The file name without `.toml` must equal `id`. The shipped packs are `personas/jarvis.toml` and `personas/friday.toml`.
+
+| Key | Type | Rules |
+|---|---|---|
+| `id` | string | Required. 1 to 32 characters, each `a-z`, `0-9`, `_` or `-`. Must equal the file name without `.toml`. Unique in the folder. |
+| `name` | string | Required. 1 to 32 characters. The display name, also used in the identity line of the system prompt. |
+| `description` | string | Required. One line, shown in the persona list. |
+| `system_prompt` | multi-line string | Required. The personality only, at most 4000 characters. It is placed inside the fixed system prompt, after the identity line and before the shared rules, and it cannot override those rules. Write tone and wording here, not rules, limits or tool names. |
+| `voice_model` | path | Required. Piper voice file (`.onnx`), relative to the working directory or absolute. Its `.onnx.json` must sit next to it. The file is not checked at startup. If it is missing, voice is off for that persona (`voice_available` is `false` in `GET /api/personas`). |
+| `wake_word` | string | Required. Lower case, 2 to 4 words, for example `"hey friday"`. Used by hands-free mode. Give each persona its own phrase: two personas with the same phrase make the match ambiguous. |
+| `[theme]` | table | Required. HUD colours as `#rrggbb` (a `#` and six hex digits): `accent` (buttons, borders, highlights), `accent_soft`, `orb_core` and `orb_glow` (the orb). |
+
+Rules for the whole file:
+
+- **Unknown keys are rejected**, in the top level and in `[theme]`. A pack cannot add settings of its own, so it cannot change limits, tools or safety behaviour.
+- A pack that breaks any rule fails the load, and the error names the file and the reason.
+- All packs in the folder are loaded and checked together, so one broken file stops the server rather than being skipped.
+- Packs are loaded in order of `id`.
+
+## Adding a persona
+
+No code change is needed.
+
+1. Copy `personas/friday.toml` to `personas/<id>.toml`, for example `personas/ops.toml`. The new `id` must match the file name.
+2. Set `id`, `name`, `description`, `system_prompt`, `wake_word` and the four `[theme]` colours. Write only the personality in `system_prompt`.
+3. For a voice, download a Piper voice from `rhasspy/piper-voices` on Hugging Face: the `.onnx` file and its `.onnx.json`. Put both in `models\piper\` and set `voice_model` to the `.onnx` path. To have `scripts/fetch-models.ps1` download it, add it to that script with its SHA-256 hashes, as the existing entries do. Without a voice file the persona still works, with voice off.
+4. Restart `jarvis-api`, because the folder is read at startup. Check the new persona in `GET /api/personas`.
+
+The persona then appears in the persona toggle and in Settings, and can be chosen as `[personas] default`.
+
+## `.env` and environment variables
+
+| Variable | Required | Effect and safety |
+|---|---|---|
+| `JARVIS_JWT_SECRET` | Yes, when `[auth] enabled = true` (the default), and for every `jarvis-api user` command | Signs session tokens and derives the key that encrypts TOTP secrets. At least 32 bytes, with at least 16 different byte values and no repeated block (a value that is Base64 or hex text is judged on the bytes it decodes to); the server refuses anything weaker. Generate a random value (see below). Changing it logs everyone out and makes stored TOTP secrets unreadable, so run `jarvis-api user reset-totp <name>` for each user afterwards. Never commit it. |
+| `JARVIS_BRIDGE_KEY` | Yes, unless `[bridge] key_file` is set | The shared bridge key as 64 hexadecimal characters. When set and not empty it wins over `key_file`; if it is set but not a valid key, the server stops instead of falling back to the file. Same secret as the content of `bridge.key`. Never commit it, and never paste it into an issue or a chat. |
+| The variable named by `api_key_env`, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | Only for that provider | The provider API key. Keep it in `.env` only. |
+| `FINNHUB_API_KEY` | Only with `[market.news] provider = "finnhub"` | Your Finnhub API key (the name is the default of `api_key_env`). Sent in a request header to Finnhub only. Keep it in `.env`; never commit it or paste it into an issue or a chat. |
+| `ALPHAVANTAGE_API_KEY` | Only with `[market.news] provider = "alphavantage"` (set `api_key_env = "ALPHAVANTAGE_API_KEY"`) | Your Alpha Vantage API key. Alpha Vantage only accepts it in the query string, so Arc MT never logs that request URL. Keep it in `.env`. |
+| `RUST_LOG` | No | Log filter (tracing `EnvFilter` syntax). Unset, the console default is `info,jarvis_api=debug,jarvis_bridge_client=debug`, and the Windows service default is `info,jarvis_api=debug,jarvis_bridge_client=info`. |
+| `JARVIS_CONFIG` | No | Path to the config file, used when `--config` is not given. |
+
+`.env` is read from the working directory by `dotenvy` at startup. Variables already set in the environment
+take precedence over the file.
+
+Generate a signing secret with a cryptographically secure source:
+
+```powershell
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes = New-Object byte[] 48
+$rng.GetBytes($bytes)
+[Convert]::ToBase64String($bytes)
+```
+
+The result is 64 characters, which is above the 32-byte minimum, and random enough to pass the other checks. Paste it after `JARVIS_JWT_SECRET=` in `.env`.
+
+### Variables used only by tests and tools
+
+| Variable | Used by | Effect |
+|---|---|---|
+| `JARVIS_BRIDGE_ENDPOINT` | `bridge-client` live tests | Endpoint of the EA. Default `tcp://127.0.0.1:5555`. |
+| `JARVIS_BRIDGE_KEY`, `JARVIS_BRIDGE_KEY_FILE` | `bridge-client` live tests and `bridge_cli` | The shared key (hex), or the path of `bridge.key`. The live tests need one of them. `bridge_cli` also has `--key-file`. |
+| `JARVIS_MOCK_KEY_FILE` | `mock_server` example | Where the offline mock writes its random key when `JARVIS_BRIDGE_KEY` is not set. Default `target/mock-bridge.key`. |
+| `JARVIS_LIVE_SYMBOL` | `bridge-client` live tests | Broker symbol the tests read or trade, default `EURUSD`. Use your broker's name. |
+| `JARVIS_OLLAMA_URL`, `JARVIS_OLLAMA_MODEL`, `JARVIS_ANTHROPIC_URL`, `JARVIS_ANTHROPIC_MODEL`, `JARVIS_OPENAI_URL`, `JARVIS_OPENAI_MODEL` | `llm` live tests | Override the provider endpoint and model. |
+| `LIBCLANG_PATH` | Build of the `whisper` feature | Folder that contains `libclang.dll`. `scripts/check.ps1` sets it when LLVM is installed in its default folder. |
+
+## Generating and checking the example file
+
+The template at `config/jarvis.example.toml` is parsed by a unit test, so an invalid example fails the test
+suite (`cargo test --workspace`). Run the full set of checks with `pwsh scripts/check.ps1`.
+
+## Related docs
+
+- [Windows service](windows-service.md) for the `service` commands and the log folder.
+- [Runbook](runbook.md) for day-to-day operation.
+- [VPS guide](vps.md) for the settings that matter on a server.

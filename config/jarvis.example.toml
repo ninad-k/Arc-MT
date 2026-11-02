@@ -1,0 +1,181 @@
+# Jarvis MT settings. Copy to config/jarvis.toml and edit.
+# Secrets (API keys) never go here: put them in .env (see .env.example).
+
+# "demo" (default) or "live". LIVE also needs the account to be real; DEMO refuses to
+# start against a real account.
+mode = "demo"
+
+[server]
+bind = "127.0.0.1:8787"
+# Serve the built web UI from the API (pnpm -C web build). Comment out for dev.
+# static_dir = "web/build"
+# HTTPS/WSS (PEM files, unencrypted key). Required, together with [auth] enabled = true, to bind
+# anything other than loopback. Rebuild the web UI and restart after changing static_dir content.
+# tls_cert = "certs/jarvis.crt"
+# tls_key = "certs/jarvis.key"
+# Extra browser origins allowed to call the API with the session cookie (CORS). Empty by default:
+# the web UI is served by the API itself, and `pnpm -C web dev` goes through the Vite proxy, which
+# is same-origin too. Anything listed here can drive the whole API.
+# dev_origins = ["http://localhost:5173"]
+# Time and size limits of the web edge. These are the defaults; the numbers only matter when the
+# server is reachable by people or programs you do not trust (a slow or greedy client cannot tie
+# the server up). Every one needs a restart.
+# header_read_timeout_secs = 10          # time to send a request's headers; also ends idle keep-alive connections
+# request_timeout_secs = 30              # most routes, body upload included (the WebSocket has no limit)
+# long_request_timeout_secs = 200        # /api/chat, /api/voice/*, /api/confirm/*; keep above your slowest provider's timeout_secs
+# max_connections = 256                  # open connections at once; more are closed at once
+# chat_rate_limit_per_minute = 20        # POST /api/chat per session (each can cost several model calls)
+# transcribe_rate_limit_per_minute = 20  # POST /api/voice/transcribe per session
+
+[bridge]
+# The EA binds here. Must be loopback.
+endpoint = "tcp://127.0.0.1:5555"
+timeout_ms = 3000
+# The shared secret between this server and the EA (security finding BR-1). The EA only answers
+# a request signed with it, and the server only believes a signed reply. `pwsh scripts\install-ea.ps1`
+# creates the key (32 random bytes as 64 hex characters) in the terminal's file sandbox and prints
+# this path. Use a TOML literal string (single quotes) so backslashes stay as they are. The
+# environment variable JARVIS_BRIDGE_KEY (the key's hex, see .env.example) overrides this setting.
+# The server does not start without a valid key. Never commit it.
+key_file = 'C:\Users\<you>\AppData\Roaming\MetaQuotes\Terminal\<terminal id>\MQL5\Files\JarvisMT\bridge.key'
+
+[database]
+url = "sqlite://data/jarvis.db"
+
+[symbols]
+# Arc MT uses canonical instrument names (XAUUSD, US100, US30, EURUSD ...) everywhere; each
+# broker's own names (XAUUSD_, US100_Spot, USTEC, EURUSD.pr ...) are mapped per broker, keyed
+# by the MT5 company name. Maps are detected automatically at start-up and whenever the
+# account in MT5 switches to another broker; see docs/symbol-mapping.md.
+#
+# The canonical instruments and their generic aliases (GOLD, NAS100, USTEC ...).
+instruments = "config/instruments.toml"
+# Curated per-broker maps (checked into the repository; beat the detected ones).
+broker_map = "config/broker_symbols.toml"
+# Where the detected map, your overrides from Settings and the broker catalog snapshots are
+# written (broker_symbols.generated.toml, broker_symbols.user.toml, broker-catalogs/).
+data_dir = "data"
+# false: do not detect automatically; only the curated and user maps apply (the Settings page
+# can still run a detection).
+auto_detect = true
+# Last resort only: appended to every symbol while the current broker has no map in any layer
+# (for example detection is off and the broker is not in broker_map). Normally empty.
+suffix = ""
+# Symbols shown in the UI watchlist: canonical names.
+watchlist = ["XAUUSD", "US100", "US30", "EURUSD", "GBPUSD", "BTCUSD"]
+
+# Spoken/typed name -> canonical instrument. Matching is case-insensitive. Older configs that
+# name broker symbols here (for example USTEC) keep working: generic aliases are mapped to
+# the canonical name.
+[symbols.aliases]
+gold = "XAUUSD"
+cold = "XAUUSD"     # common speech-to-text mishearing
+sona = "XAUUSD"     # Hindi
+silver = "XAGUSD"
+nasdaq = "US100"
+nas = "US100"
+dow = "US30"
+"dow jones" = "US30"
+"s&p" = "US500"
+spx = "US500"
+euro = "EURUSD"
+fiber = "EURUSD"
+cable = "GBPUSD"
+pound = "GBPUSD"
+bitcoin = "BTCUSD"
+btc = "BTCUSD"
+
+[llm]
+# Provider used when a chat request does not name one.
+default = "local"
+
+[[llm.providers]]
+name = "local"
+kind = "ollama"
+model = "qwen3.5:9b"            # fits an 8 GB GPU; ~2 s per reply once loaded
+base_url = "http://127.0.0.1:11434"
+timeout_secs = 180              # the first request after a cold start loads the model (~100 s)
+
+[[llm.providers]]
+name = "claude"
+kind = "anthropic"
+model = "claude-sonnet-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[[llm.providers]]
+name = "openai"
+kind = "openai"
+model = "gpt-5"                 # set to the model your key can use
+api_key_env = "OPENAI_API_KEY"
+
+# ---- Trading (Sprint 2). Every limit is checked before a preview is shown. ----
+[limits]
+max_lot = 1.0                 # per new order (closing is never limited by this)
+max_positions = 5             # open positions + pending orders after a new order
+max_daily_loss = 500.0        # account currency; new orders blocked at -500 today
+# Canonical names: they apply on every broker, whatever the broker calls the instrument.
+allowed_symbols = ["XAUUSD", "XAGUSD", "US100", "US30", "US500", "EURUSD", "GBPUSD", "BTCUSD"]
+
+# New orders only inside this window (broker server time). Remove to allow any time.
+[limits.trading_hours]
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "00:05"
+end = "23:55"
+
+[trading]
+token_ttl_secs = 15           # confirm window
+voice_token_cap_secs = 30     # voice: window starts after read-back, never beyond this
+deviation_points = 20         # max slippage for market orders
+kill_switch_engaged = false   # start with trading disabled
+
+# ---- Login (Sprint 4). Create a user with: cargo run -p jarvis-api -- user add <name>
+# The JWT secret comes from env JARVIS_JWT_SECRET (see .env.example).
+[auth]
+enabled = true
+session_hours = 12            # 1 to 168
+# The session cookie is Secure whenever the server itself serves TLS. Set this to true when a
+# reverse proxy terminates TLS in front of a plain-HTTP loopback port.
+# cookie_secure = true
+
+# ---- Voice (Sprint 3). Fetch models with: pwsh scripts/fetch-models.ps1 ----
+[voice]
+enabled = true
+whisper_model = "models/whisper/ggml-base.en.bin"
+language = "en"
+threads = 4
+piper_exe = "models/piper/piper.exe"
+piper_voice = "models/piper/en_US-lessac-medium.onnx"
+max_seconds = 30
+
+# ---- Personas. Packs live in this folder as <id>.toml (see personas/jarvis.toml).
+# A persona changes name, personality, voice, wake phrase and colours only; all safety
+# rules, limits and confirmations are shared. Users pick theirs in Settings.
+[personas]
+dir = "personas"
+default = "jarvis"
+
+# ---- Market views: an intraday view of an instrument (bias, confidence, entry zone, stop and
+# two targets, key levels, reasons) computed in code from the broker's own prices, the MT5
+# economic calendar and, if you set a provider below, headline news. A view is information
+# only: it never places or proposes a trade. "Prepare trade" in the app turns one into the
+# usual preview, which goes through every limit and needs your confirmation. Every view is
+# stored and later scored against what the price did. Needs the EA at version 0.5.0 or newer.
+[market]
+enabled = true
+horizon_minutes = 240            # how long a view stays valid (15 to 1440)
+event_blackout_minutes = 30      # stand aside this close to a high-impact event (0 to 240)
+calendar_min_importance = "moderate"   # low | moderate | high
+rate_limit_per_minute = 30       # views and news requests per minute and session
+
+# News is optional. With provider = "none" the view simply has no news factor.
+# finnhub: https://finnhub.io (free key). alphavantage: https://www.alphavantage.co (free key).
+# The key is read from the environment (put it in .env), never from this file.
+[market.news]
+provider = "none"                # none | finnhub | alphavantage
+api_key_env = "FINNHUB_API_KEY"  # the NAME of the variable; ALPHAVANTAGE_API_KEY for alphavantage
+cache_minutes = 10
+
+# Advanced: change the scoring model (weights, thresholds, ATR multiples). The keys are those
+# of jarvis_market::ViewConfig; leave this out unless you know what you are changing.
+# [market.view]
+# weight_h4_trend = 25.0
