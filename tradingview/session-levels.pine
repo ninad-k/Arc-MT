@@ -117,8 +117,10 @@ profile(Sess s) =>
     int cnt = s.hs.size()
     if cnt > 0
         for i = 0 to cnt - 1
-            int   b0 = math.max(int(math.floor(s.ls.get(i) / row)) - base, 0)
-            int   b1 = math.min(int(math.floor(s.hs.get(i) / row)) - base, n - 1)
+            // Clamp both ends to the bin range: a live detail bar can sit outside the
+            // session range recorded so far, and a downward `for` would read past the array.
+            int   b0 = math.min(math.max(int(math.floor(s.ls.get(i) / row)) - base, 0), n - 1)
+            int   b1 = math.max(math.min(int(math.floor(s.hs.get(i) / row)) - base, n - 1), b0)
             float v  = s.vs.get(i)
             v := na(v) or v <= 0 ? 1.0 : v          // no volume data -> count time instead
             float per = v / (b1 - b0 + 1)
@@ -169,14 +171,16 @@ drawLv(Lv lv, int x2) =>
             ln.set_xy2(x2, prices.get(i))
 
 // Emit one group of labels (merged when close together) above or below their lines
-emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above) =>
+// Live (still running) sessions sit just right of the current candle with the text
+// extending rightwards, so the chip never covers the candle at any zoom level.
+emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above, bool live) =>
     if prices.size() > 0
         idx = prices.sort_indices(order.descending)
         float  tol = close * mergePct / 100
         float  gp  = na
         color  gc  = na
         string txt = ""
-        string sty = above ? label.style_label_down : label.style_label_up
+        string sty = live ? label.style_label_left : above ? label.style_label_down : label.style_label_up
         for k = 0 to idx.size() - 1
             int    i    = idx.get(k)
             float  p    = prices.get(i)
@@ -191,7 +195,7 @@ emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, boo
                 txt += "  |  " + item
         lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
 
-buildTags(Lv lv) =>
+buildTags(Lv lv, bool live) =>
     for lb in lv.tags
         lb.delete()
     lv.tags.clear()
@@ -207,8 +211,8 @@ buildTags(Lv lv) =>
         dnP.push(lv.val), dnN.push(lv.name + " VAL"), dnC.push(lv.col)
     if showOpen
         dnP.push(lv.o), dnN.push(lv.name + " Open"), dnC.push(lv.dot)
-    emitTags(lv, upP, upN, upC, true)
-    emitTags(lv, dnP, dnN, dnC, false)
+    emitTags(lv, upP, upN, upC, true, live)
+    emitTags(lv, dnP, dnN, dnC, false, live)
 
 // Vertical line across the pane at a session's start or end
 vline(Lv lv, int t) =>
@@ -282,7 +286,7 @@ for [i, s] in S
             lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
             lv.t1 := time
             drawLv(lv, time)
-            buildTags(lv)
+            buildTags(lv, false)
             vline(lv, time)
 
 // Keep the current day's lines reaching the latest bar; close the day once no session runs
@@ -305,7 +309,7 @@ if barstate.islast and not na(cur) and cur.isOpen
             if not na(lv)
                 [vah, poc, val] = profile(s)
                 lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
-                lv.t1 := time + 2 * timeframe.in_seconds() * 1000
+                lv.t1 := time + timeframe.in_seconds() * 1000
                 drawLv(lv, time)
-                buildTags(lv)
+                buildTags(lv, true)
     extendDay(cur, time)

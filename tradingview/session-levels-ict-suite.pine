@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 // Session Levels + ICT Suite
 //
 // One indicator combining:
@@ -131,8 +131,10 @@ profile(Sess s) =>
     int cnt = s.hs.size()
     if cnt > 0
         for i = 0 to cnt - 1
-            int   b0 = math.max(int(math.floor(s.ls.get(i) / row)) - base, 0)
-            int   b1 = math.min(int(math.floor(s.hs.get(i) / row)) - base, nb - 1)
+            // Clamp both ends to the bin range: a live detail bar can sit outside the
+            // session range recorded so far, and a downward `for` would read past the array.
+            int   b0 = math.min(math.max(int(math.floor(s.ls.get(i) / row)) - base, 0), nb - 1)
+            int   b1 = math.max(math.min(int(math.floor(s.hs.get(i) / row)) - base, nb - 1), b0)
             float vv = s.vs.get(i)
             vv := na(vv) or vv <= 0 ? 1.0 : vv          // no volume data -> count time instead
             float perBin = vv / (b1 - b0 + 1)
@@ -183,14 +185,16 @@ drawLv(Lv lv, int x2) =>
             ln.set_xy2(x2, prices.get(i))
 
 // Emit one group of labels (merged when close together) above or below their lines
-emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above) =>
+// Live (still running) sessions sit just right of the current candle with the text
+// extending rightwards, so the chip never covers the candle at any zoom level.
+emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above, bool live) =>
     if prices.size() > 0
         idx = prices.sort_indices(order.descending)
         float  tol = close * mergePct / 100
         float  gp  = na
         color  gc  = na
         string txt = ""
-        string sty = above ? label.style_label_down : label.style_label_up
+        string sty = live ? label.style_label_left : above ? label.style_label_down : label.style_label_up
         for k = 0 to idx.size() - 1
             int    i    = idx.get(k)
             float  p    = prices.get(i)
@@ -205,7 +209,7 @@ emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, boo
                 txt += "  |  " + item
         lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
 
-buildTags(Lv lv) =>
+buildTags(Lv lv, bool live) =>
     for lb in lv.tags
         lb.delete()
     lv.tags.clear()
@@ -221,8 +225,8 @@ buildTags(Lv lv) =>
         dnP.push(lv.val), dnN.push(lv.name + " VAL"), dnC.push(lv.col)
     if showOpen
         dnP.push(lv.o), dnN.push(lv.name + " Open"), dnC.push(lv.dot)
-    emitTags(lv, upP, upN, upC, true)
-    emitTags(lv, dnP, dnN, dnC, false)
+    emitTags(lv, upP, upN, upC, true, live)
+    emitTags(lv, dnP, dnN, dnC, false, live)
 
 // Vertical line across the pane at a session's start or end
 vline(Lv lv, int t) =>
@@ -299,7 +303,7 @@ for [i, s] in S
             lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
             lv.t1 := time
             drawLv(lv, time)
-            buildTags(lv)
+            buildTags(lv, false)
             vline(lv, time)
 
 // Keep the current day's lines reaching the latest bar; close the day once no session runs
@@ -322,9 +326,9 @@ if barstate.islast and dayOpen(cur)
             if not na(lv)
                 [vah, poc, val] = profile(s)
                 lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
-                lv.t1 := time + 2 * timeframe.in_seconds(timeframe.period) * 1000
+                lv.t1 := time + timeframe.in_seconds(timeframe.period) * 1000
                 drawLv(lv, time)
-                buildTags(lv)
+                buildTags(lv, true)
     extendDay(cur, time)
 
 //=============================================================================
@@ -575,7 +579,7 @@ var  ZZ         aZZ       =
  array.new < int    >(maxSize,  0),
  array.new < int    >(maxSize,  0),
  array.new < float  >(maxSize, na),
- array.new < bool   >(maxSize, na))
+ array.new < bool   >(maxSize, false))
 
 var line _diag = line.new(na, na, na, na, color=color.new(color.silver, 50), style=line.style_dashed, xloc= xloc            )
 var line _vert = line.new(na, na, na, na, color=color.new(color.silver, 50), style=line.style_dotted, xloc= xloc            )
@@ -679,7 +683,7 @@ draw(left, col) =>
     x2      := bar_index -1
     ph       = ta.pivothigh(hi, left, 1)
     pl       = ta.pivotlow (lo, left, 1)
-    if ph
+    if not na(ph)
         dir := aZZ.d.get (0)
         x1  := aZZ.x.get (0)
         y1  := aZZ.y.get (0)
@@ -735,7 +739,7 @@ draw(left, col) =>
                     getLast.bx.delete()
                     getLast.ln.delete()
     //
-    if pl
+    if not na(pl)
         dir := aZZ.d.get (0)
         x1  := aZZ.x.get (0)
         y1  := aZZ.y.get (0)
@@ -864,10 +868,10 @@ if MSS.l_bosBr.size() > 200
     MSS.lbBosBr.pop().delete()
 
 //Killzones
-ny          = time(timeframe.period, input.session('0700-0900', '', inline = 'ny', group = 'Killzones'), 'America/New_York') and showNy
-ldn_open    = time(timeframe.period, input.session('0700-1000', '', inline = 'lo', group = 'Killzones'), 'Europe/London'   ) and showLdno // 0200-0500 UTC-5
-ldn_close   = time(timeframe.period, input.session('1500-1700', '', inline = 'lc', group = 'Killzones'), 'Europe/London'   ) and showLdnc // 1000-1200 UTC-5
-asian       = time(timeframe.period, input.session('1000-1400', '', inline = 'as', group = 'Killzones'), 'Asia/Tokyo'      ) and showAsia // 2000-0000 UTC-5
+ny          = not na(time(timeframe.period, input.session('0700-0900', '', inline = 'ny', group = 'Killzones'), 'America/New_York')) and showNy
+ldn_open    = not na(time(timeframe.period, input.session('0700-1000', '', inline = 'lo', group = 'Killzones'), 'Europe/London'   )) and showLdno // 0200-0500 UTC-5
+ldn_close   = not na(time(timeframe.period, input.session('1500-1700', '', inline = 'lc', group = 'Killzones'), 'Europe/London'   )) and showLdnc // 1000-1200 UTC-5
+asian       = not na(time(timeframe.period, input.session('1000-1400', '', inline = 'as', group = 'Killzones'), 'Asia/Tokyo'      )) and showAsia // 2000-0000 UTC-5
 
 //Pivotpoints
 ph          = ta.pivothigh(3, 1), lPh = fixnan(ph)
@@ -1107,7 +1111,7 @@ if barstate.isfirst
 if dayofweek == dayofweek.friday
     friCp := close, friCi := n
 
-if ta.change(dayofweek)
+if ta.change(dayofweek) != 0
     if  dayofweek == dayofweek.monday and iNWOG
         monOp := open , monOi := n
         bl_NWOG.unshift(bx_ln.new(
@@ -1807,10 +1811,10 @@ var box   pl_bx = box.new(na,na,na,na
 ls_ph = ta.pivothigh(ls_length, ls_length)
 
 //Get ls_ph counts
-[ph_count, ph_vol] = ls_get_counts(ls_ph, ph_top, ph_btm)
+[ph_count, ph_vol] = ls_get_counts(not na(ls_ph), ph_top, ph_btm)
 
 //Set ls_ph ls_area and level
-if ls_ph and ls_showTop and ls_on
+if not na(ls_ph) and ls_showTop and ls_on
     ph_top := high[ls_length]
     ph_btm := switch ls_area
         'Wick Extremity' => math.max(close[ls_length], open[ls_length])
@@ -1831,10 +1835,10 @@ else
 
 if ls_showTop and ls_on
     //Set ls_ph zone
-    ls_set_zone(ls_ph, ph_x1, ph_top, ph_btm, ph_count, ph_vol, ls_topAreaCss)
+    ls_set_zone(not na(ls_ph), ph_x1, ph_top, ph_btm, ph_count, ph_vol, ls_topAreaCss)
 
     //Set ls_ph level
-    ls_set_level(ls_ph, ph_crossed, ph_top, ph_count, ph_vol, ls_topCss)
+    ls_set_level(not na(ls_ph), ph_crossed, ph_top, ph_count, ph_vol, ls_topCss)
 
     //Set ls_ph label
     ls_set_label(ph_count, ph_vol, ph_x1, ph_top, ls_topCss, label.style_label_down)
@@ -1845,10 +1849,10 @@ if ls_showTop and ls_on
 ls_pl = ta.pivotlow(ls_length, ls_length)
 
 //Get ls_pl counts
-[pl_count, pl_vol] = ls_get_counts(ls_pl, pl_top, pl_btm)
+[pl_count, pl_vol] = ls_get_counts(not na(ls_pl), pl_top, pl_btm)
 
 //Set ls_pl ls_area and level
-if ls_pl and ls_showBtm and ls_on
+if not na(ls_pl) and ls_showBtm and ls_on
     pl_top := switch ls_area
         'Wick Extremity' => math.min(close[ls_length], open[ls_length])
         'Full Range' => high[ls_length]
@@ -1869,10 +1873,10 @@ else
 
 if ls_showBtm and ls_on
     //Set ls_pl zone
-    ls_set_zone(ls_pl, pl_x1, pl_top, pl_btm, pl_count, pl_vol, ls_btmAreaCss)
+    ls_set_zone(not na(ls_pl), pl_x1, pl_top, pl_btm, pl_count, pl_vol, ls_btmAreaCss)
 
     //Set ls_pl level
-    ls_set_level(ls_pl, pl_crossed, pl_btm, pl_count, pl_vol, ls_btmCss)
+    ls_set_level(not na(ls_pl), pl_crossed, pl_btm, pl_count, pl_vol, ls_btmCss)
 
     //Set ls_pl labels
     ls_set_label(pl_count, pl_vol, pl_x1, pl_btm, ls_btmCss, label.style_label_up)
