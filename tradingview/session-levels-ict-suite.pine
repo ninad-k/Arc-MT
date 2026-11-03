@@ -1,0 +1,1880 @@
+//@version=5
+// Session Levels + ICT Suite
+//
+// One indicator combining:
+//   1. Session Levels: Open, High, Low and volume-profile VAH / POC / VAL for the
+//      Asia, London and New York sessions (original code in this file).
+//   2. ICT Concepts [LuxAlgo]
+//   3. Supply and Demand Visible Range [LuxAlgo]
+//   4. Liquidity Swings [LuxAlgo]
+//
+// Parts 2-4 are © LuxAlgo and licensed CC BY-NC-SA 4.0
+// (https://creativecommons.org/licenses/by-nc-sa/4.0/). They are included
+// unchanged apart from renaming identifiers so the modules can share one script.
+// This combined script inherits that licence: keep it private / non-commercial.
+indicator("Session Levels + ICT Suite", shorttitle = "SL + ICT", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 3000)
+
+//=============================================================================
+// MODULE 1: Session Levels
+//=============================================================================
+grpS = "Sessions (local exchange hours)"
+asiaOn  = input.bool(true, "Asia", inline = "a", group = grpS)
+asiaSes = input.session("0900-1800", "", inline = "a", group = grpS)
+asiaTz  = input.string("Asia/Tokyo", "", inline = "a", group = grpS)
+asiaCol = input.color(#FF9800, "", inline = "a", group = grpS)
+asiaDot = input.color(#FFC107, "", inline = "a", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+lonOn   = input.bool(true, "London", inline = "l", group = grpS)
+lonSes  = input.session("0800-1700", "", inline = "l", group = grpS)
+lonTz   = input.string("Europe/London", "", inline = "l", group = grpS)
+lonCol  = input.color(#2196F3, "", inline = "l", group = grpS)
+lonDot  = input.color(#2196F3, "", inline = "l", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+nyOn    = input.bool(true, "New York", inline = "n", group = grpS)
+nySes   = input.session("0800-1700", "", inline = "n", group = grpS)
+nyTz    = input.string("America/New_York", "", inline = "n", group = grpS)
+nyCol   = input.color(#E91E63, "", inline = "n", group = grpS)
+nyDot   = input.color(#E91E63, "", inline = "n", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+
+grpP  = "Session volume profile"
+vaPct = input.float(70, "Value area %", minval = 10, maxval = 100, group = grpP) / 100
+rowIn = input.float(0, "Row size (0 = auto)", minval = 0, group = grpP,
+     tooltip = "Price step for the profile. Auto picks a round step near 0.025% of price (about 1.0 on gold).")
+ltfIn = input.timeframe("1", "Detail timeframe", group = grpP,
+     tooltip = "Lower timeframe used to build the profile. Falls back to chart bars where no detail data exists.")
+
+grpD     = "Session levels display"
+daysN    = input.int(2, "Days to show", minval = 1, maxval = 20, group = grpD)
+extendTo = input.string("Day end", "Extend lines to", options = ["Day end", "Session end"], group = grpD,
+     tooltip = "Day end: lines run until the last session of the day closes. Session end: lines stop when their own session closes.")
+showHL   = input.bool(true, "Session High / Low", group = grpD)
+showVA   = input.bool(true, "VAH / POC / VAL", group = grpD)
+showOpen = input.bool(true, "Session Open", group = grpD)
+showVert = input.bool(true, "Session start / end lines", group = grpD)
+vertTransp = input.int(50, "Start / end line transparency", minval = 0, maxval = 90, group = grpD)
+mergePct = input.float(0.03, "Merge labels within (% of price)", minval = 0, step = 0.01, group = grpD)
+lblSize  = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = grpD)
+vaTransp = input.int(35, "VAH / VAL line transparency", minval = 0, maxval = 90, group = grpD)
+
+// ---------------------------------------------------------------- Types
+type Sess
+    string       name
+    color        col
+    color        dot
+    bool         on
+    array<float> hs
+    array<float> ls
+    array<float> vs
+    bool         active = false
+    float        hi
+    float        lo
+
+type Lv
+    string       name
+    color        col
+    color        dot
+    int          t0
+    int          t1           // where this session's labels sit
+    float        o
+    float        hi
+    float        lo
+    float        vah
+    float        poc
+    float        val
+    array<line>  lines
+    array<line>  vls          // vertical start / end lines
+    array<label> tags
+
+type Day
+    array<Lv>    lvs
+    array<label> dots
+    bool         isOpen = true
+
+// ---------------------------------------------------------------- Data
+ltf = timeframe.in_seconds(ltfIn) < timeframe.in_seconds(timeframe.period) ? ltfIn : timeframe.period
+[ltfH, ltfL, ltfV] = request.security_lower_tf(syminfo.tickerid, ltf, [high, low, volume])
+
+inAsia = not na(time(timeframe.period, asiaSes, asiaTz))
+inLon  = not na(time(timeframe.period, lonSes, lonTz))
+inNy   = not na(time(timeframe.period, nySes, nyTz))
+inArr  = array.from(inAsia, inLon, inNy)
+
+var array<Sess> S = array.from(
+     Sess.new("Asia",   asiaCol, asiaDot, asiaOn, array.new<float>(), array.new<float>(), array.new<float>()),
+     Sess.new("London", lonCol,  lonDot,  lonOn,  array.new<float>(), array.new<float>(), array.new<float>()),
+     Sess.new("NY",     nyCol,   nyDot,   nyOn,   array.new<float>(), array.new<float>(), array.new<float>()))
+var array<Day> days = array.new<Day>()
+
+// ---------------------------------------------------------------- Helpers
+// v5 evaluates both sides of `and` / `or`, so na-object checks are done in steps.
+dayOpen(Day d) =>
+    bool res = false
+    if not na(d)
+        res := d.isOpen
+    res
+
+rowSize() =>
+    float rr = rowIn
+    if rr <= 0
+        float raw  = close * 0.00025
+        float p10  = math.pow(10, math.floor(math.log10(raw)))
+        float mm   = raw / p10
+        float nice = mm < 1.5 ? 1.0 : mm < 2.25 ? 2.0 : mm < 3.5 ? 2.5 : mm < 7.5 ? 5.0 : 10.0
+        rr := nice * p10
+    math.max(rr, syminfo.mintick)
+
+// Volume profile of one session -> [VAH, POC, VAL]
+profile(Sess s) =>
+    float row  = rowSize()
+    int   base = int(math.floor(s.lo / row))
+    int   nb   = math.max(math.min(int(math.floor(s.hi / row)) - base + 1, 5000), 1)
+    vol = array.new<float>(nb, 0.0)
+    int cnt = s.hs.size()
+    if cnt > 0
+        for i = 0 to cnt - 1
+            int   b0 = math.max(int(math.floor(s.ls.get(i) / row)) - base, 0)
+            int   b1 = math.min(int(math.floor(s.hs.get(i) / row)) - base, nb - 1)
+            float vv = s.vs.get(i)
+            vv := na(vv) or vv <= 0 ? 1.0 : vv          // no volume data -> count time instead
+            float perBin = vv / (b1 - b0 + 1)
+            for bi = b0 to b1
+                vol.set(bi, vol.get(bi) + perBin)
+    int   ip    = vol.indexof(vol.max())
+    float total = vol.sum()
+    int   ia    = ip
+    int   iz    = ip
+    float acc   = vol.get(ip)
+    while acc < vaPct * total and (ia > 0 or iz < nb - 1)
+        float up = iz < nb - 1 ? vol.get(iz + 1) : -1.0
+        float dn = ia > 0 ? vol.get(ia - 1) : -1.0
+        if up >= dn
+            iz += 1
+            acc += vol.get(iz)
+        else
+            ia -= 1
+            acc += vol.get(ia)
+    [math.min((base + iz + 1) * row, s.hi), (base + ip + 0.5) * row, math.max((base + ia) * row, s.lo)]
+
+findLv(Day d, string name) =>
+    Lv found = na
+    if not na(d)
+        for lv in d.lvs
+            if lv.name == name
+                found := lv
+    found
+
+// Lines in order: High, VAH, POC, VAL, Low, Open
+drawLv(Lv lv, int x2) =>
+    prices = array.from(lv.hi, lv.vah, lv.poc, lv.val, lv.lo, lv.o)
+    if lv.lines.size() == 0
+        for i = 0 to 5
+            bool   isVA  = i >= 1 and i <= 3
+            bool   isPoc = i == 2
+            bool   isO   = i == 5
+            bool   show  = isO ? showOpen : isVA ? showVA : showHL
+            color  base  = isO ? lv.dot : lv.col
+            color  c     = not show ? na : (isVA and not isPoc) ? color.new(base, vaTransp) : base
+            string st    = isO ? line.style_dotted : (isVA and not isPoc) ? line.style_dashed : line.style_solid
+            int    w     = isPoc ? 3 : isO or isVA ? 1 : 2
+            lv.lines.push(line.new(lv.t0, prices.get(i), x2, prices.get(i), xloc.bar_time, extend.none, c, st, w))
+    else
+        for i = 0 to 5
+            line ln = lv.lines.get(i)
+            ln.set_xy1(lv.t0, prices.get(i))
+            ln.set_xy2(x2, prices.get(i))
+
+// Emit one group of labels (merged when close together) above or below their lines
+emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above) =>
+    if prices.size() > 0
+        idx = prices.sort_indices(order.descending)
+        float  tol = close * mergePct / 100
+        float  gp  = na
+        color  gc  = na
+        string txt = ""
+        string sty = above ? label.style_label_down : label.style_label_up
+        for k = 0 to idx.size() - 1
+            int    i    = idx.get(k)
+            float  p    = prices.get(i)
+            string item = names.get(i) + " " + str.tostring(p, format.mintick)
+            if na(gp) or gp - p > tol
+                if not na(gp)
+                    lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
+                gp  := p
+                gc  := cols.get(i)
+                txt := item
+            else
+                txt += "  |  " + item
+        lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
+
+buildTags(Lv lv) =>
+    for lb in lv.tags
+        lb.delete()
+    lv.tags.clear()
+    // Above the line: High, VAH, POC.  Below the line: VAL, Low, Open.
+    upP = array.new<float>(),  upN = array.new<string>(),  upC = array.new<color>()
+    dnP = array.new<float>(),  dnN = array.new<string>(),  dnC = array.new<color>()
+    if showHL
+        upP.push(lv.hi), upN.push(lv.name + " H"), upC.push(lv.col)
+        dnP.push(lv.lo), dnN.push(lv.name + " L"), dnC.push(lv.col)
+    if showVA
+        upP.push(lv.vah), upN.push(lv.name + " VAH"), upC.push(lv.col)
+        upP.push(lv.poc), upN.push(lv.name + " POC"), upC.push(lv.col)
+        dnP.push(lv.val), dnN.push(lv.name + " VAL"), dnC.push(lv.col)
+    if showOpen
+        dnP.push(lv.o), dnN.push(lv.name + " Open"), dnC.push(lv.dot)
+    emitTags(lv, upP, upN, upC, true)
+    emitTags(lv, dnP, dnN, dnC, false)
+
+// Vertical line across the pane at a session's start or end
+vline(Lv lv, int t) =>
+    if showVert
+        lv.vls.push(line.new(t, low, t, high, xloc.bar_time, extend.both, color.new(lv.col, vertTransp), line.style_dotted, 1))
+
+extendDay(Day d, int x2) =>
+    if extendTo == "Day end"
+        for lv in d.lvs
+            for ln in lv.lines
+                ln.set_x2(x2)
+
+newDay() =>
+    Day d = Day.new(array.new<Lv>(), array.new<label>())
+    days.push(d)
+    while days.size() > daysN
+        Day old = days.shift()
+        for lv in old.lvs
+            for ln in lv.lines
+                ln.delete()
+            for ln in lv.vls
+                ln.delete()
+            for lb in lv.tags
+                lb.delete()
+        for lb in old.dots
+            lb.delete()
+    d
+
+// ---------------------------------------------------------------- Main
+Day cur = days.size() > 0 ? days.last() : na
+
+for [i, s] in S
+    if not s.on
+        continue
+    bool inS = inArr.get(i)
+
+    // Session start: open a new day if this session already ran in the current one
+    if inS and not s.active
+        bool needNew = not dayOpen(cur)
+        if not needNew
+            needNew := not na(findLv(cur, s.name))
+        if needNew
+            if dayOpen(cur)
+                cur.isOpen := false
+                extendDay(cur, time)
+            cur := newDay()
+        s.active := true
+        s.hi := high
+        s.lo := low
+        s.hs.clear(), s.ls.clear(), s.vs.clear()
+        Lv nlv = Lv.new(s.name, s.col, s.dot, time, time, open, high, low, na, na, na, array.new<line>(), array.new<line>(), array.new<label>())
+        cur.lvs.push(nlv)
+        vline(nlv, time)
+        if showOpen
+            cur.dots.push(label.new(time, open, "", xloc.bar_time, yloc.price, s.dot, label.style_circle, s.dot, size.tiny))
+
+    // Inside the session: collect detail bars
+    if inS
+        s.hi := math.max(s.hi, high)
+        s.lo := math.min(s.lo, low)
+        int mm = ltfH.size()
+        if mm > 0
+            for k = 0 to mm - 1
+                s.hs.push(ltfH.get(k)), s.ls.push(ltfL.get(k)), s.vs.push(ltfV.get(k))
+        else
+            s.hs.push(high), s.ls.push(low), s.vs.push(volume)
+
+    // Session end (first bar after it): finalise its levels and labels
+    if not inS and s.active
+        s.active := false
+        Lv lv = findLv(cur, s.name)
+        if not na(lv)
+            [vah, poc, val] = profile(s)
+            lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
+            lv.t1 := time
+            drawLv(lv, time)
+            buildTags(lv)
+            vline(lv, time)
+
+// Keep the current day's lines reaching the latest bar; close the day once no session runs
+if dayOpen(cur)
+    bool anyActive = false
+    for s in S
+        if s.on and s.active
+            anyActive := true
+    if anyActive
+        extendDay(cur, time)
+    else if cur.lvs.size() > 0
+        cur.isOpen := false
+        extendDay(cur, time)
+
+// Live: update running sessions, with their labels just right of the current candle
+if barstate.islast and dayOpen(cur)
+    for s in S
+        if s.on and s.active
+            Lv lv = findLv(cur, s.name)
+            if not na(lv)
+                [vah, poc, val] = profile(s)
+                lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
+                lv.t1 := time + 2 * timeframe.in_seconds(timeframe.period) * 1000
+                drawLv(lv, time)
+                buildTags(lv)
+    extendDay(cur, time)
+
+//=============================================================================
+// MODULE 2: ICT Concepts [LuxAlgo]
+//=============================================================================
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+//-----------------------------------------------------------------------------}
+//Strings
+//-----------------------------------------------------------------------------{
+o          = 'Options'
+sp1        = '       '
+sp2        = '              '
+hl         = 'High / Low    ' + sp1
+ny_        = 'New York'       + sp1
+lo_        = 'London Open'
+lc_        = 'London Close'
+as_        = 'Asian'
+
+//-----------------------------------------------------------------------------}
+//Settings
+//-----------------------------------------------------------------------------{
+i_mode     = input.string(         'Present'      , title = 'Mode'                   , options =['Present', 'Historical']                                              )
+
+//Market Structure Shift
+showMS     = input.bool  (           true         , title = ''                       ,   group = 'Market Structures', inline = 'MS'                                    )
+len        = input.int   (             5          , title = '     Length   ' +sp2    ,   group = 'Market Structures', inline = 'MS'       , minval = 3, maxval =  10   )
+
+iMSS       = input.bool  (           true         , title = '       MSS'     +sp1    ,   group = 'Market Structures', inline = 'M1'                                    )
+cMSSbl     = input.color (color.new(#00e6a1,  0), title = 'bullish'                ,   group = 'Market Structures', inline = 'M1'                                    )
+cMSSbr     = input.color (color.new(#e60400,  0), title = 'bearish'                ,   group = 'Market Structures', inline = 'M1'                                    )
+
+iBOS       = input.bool  (           true         , title = '       BOS'     +sp1    ,   group = 'Market Structures', inline = 'BS'                                    )
+cBOSbl     = input.color (color.new(#00e6a1,  0), title = 'bullish'                ,   group = 'Market Structures', inline = 'BS'                                    )
+cBOSbr     = input.color (color.new(#e60400,  0), title = 'bearish'                ,   group = 'Market Structures', inline = 'BS'                                    )
+
+//Displacement
+sDispl     = input.bool  (           false        , title = 'Show Displacement'      ,   group = 'Displacement'                                                        )
+
+perc_Body  = 0.36 // input.int(   36, minval=1, maxval=36) / 100
+bxBack     = 10   // input.int(   10, minval=0, maxval=10)
+
+sVimbl     = input.bool  (           true         , title = ''                       ,   group = 'Volume Imbalance' , inline = 'VI'                                    )
+visVim     = input.int   (             2          , title = "   # Visible VI's  "+sp1,   group = 'Volume Imbalance' , inline = 'VI'      , minval = 2, maxval = 100    )
+cVimbl     = input.color (color.new(#06b2d0,  0), title = ''                       ,   group = 'Volume Imbalance' , inline = 'VI'                                    )
+
+//Order Blocks
+showOB     = input.bool  (           true         , title = 'Show Order Blocks'      ,   group = 'Order Blocks'                                                        )
+length     = input.int   (            10          , title = 'Swing Lookback'         ,   group = 'Order Blocks'                          , minval = 3                  )
+showBull   = input.int   (             1          , title = 'Show Last Bullish OB'   ,   group = 'Order Blocks'                          , minval = 0                  )
+showBear   = input.int   (             1          , title = 'Show Last Bearish OB'   ,   group = 'Order Blocks'                          , minval = 0                  )
+useBody    = input.bool  (           true         , title = 'Use Candle Body'                                                                                          )
+
+//OB Style
+bullCss    = input.color (color.new(#3e89fa,  0), title = 'Bullish OB  '           ,   group = 'Order Blocks'     , inline = 'bullcss'                               )
+bullBrkCss = input.color (color.new(#4785f9, 85), title = 'Bullish Break  '        ,   group = 'Order Blocks'     , inline = 'bullcss'                               )
+
+bearCss    = input.color (color.new(#FF3131,  0), title = 'Bearish OB'             ,   group = 'Order Blocks'     , inline = 'bearcss'                               )
+bearBrkCss = input.color (color.new(#f9ff57, 85), title = 'Bearish Break'          ,   group = 'Order Blocks'     , inline = 'bearcss'                               )
+
+showLabels = input.bool  (          false, title = 'Show Historical Polarity Changes',   group = 'Order Blocks'                                                        )
+
+//Liquidity
+showLq     = input.bool  (           true         , title = 'Show Liquidity'         ,   group = 'Liquidity'                                                           )
+a     = 10 / input.float (             4          , title = 'margin'                 ,   group = 'Liquidity'   , step = 0.1, minval = 2, maxval =   7                  )
+visLiq     = input.int   (             2          , title = '# Visible Liq. boxes'   ,   group = 'Liquidity'
+           ,                                       minval = 1         , maxval = 50  , tooltip = 'In the same direction'                                               )
+cLIQ_B     = input.color (color.new(#fa451c,  0), title = 'Buyside Liquidity  '    ,   group = 'Liquidity'                                                           )
+cLIQ_S     = input.color (color.new(#1ce4fa,  0), title = 'Sellside Liquidity'     ,   group = 'Liquidity'                                                           )
+
+//FVG
+shwFVG     = input.bool  (           true         , title = 'Show FVGs'              ,   group = 'Fair Value Gaps'                                                     )
+i_BPR      = input.bool  (           false        , title = 'Balance Price Range'    ,   group = 'Fair Value Gaps'                                                     )
+i_FVG      = input.string(           'FVG'        , title = o                        ,   group = 'Fair Value Gaps'  , options=['FVG', 'IFVG']
+           ,                                                                           tooltip = 'Fair Value Gaps\nor\nImplied Fair Value Gaps'                        )
+visBxs     = input.int   (             2          , title = '# Visible FVG\'s'       ,   group = 'Fair Value Gaps'
+           ,                                       minval = 1         , maxval = 20  , tooltip = 'In the same direction'                                               )
+
+//FVG Style
+cFVGbl     = input.color (color.new(#00e676,  0), title = 'Bullish FVG  '          ,   group = 'Fair Value Gaps'  , inline = 'FVGbl'                                 )
+cFVGblBR   = input.color (color.new(#808000,  0), title = 'Break'                  ,   group = 'Fair Value Gaps'  , inline = 'FVGbl'                                 )
+cFVGbr     = input.color (color.new(#ff5252,  0), title = 'Bearish FVG '           ,   group = 'Fair Value Gaps'  , inline = 'FVGbr'                                 )
+cFVGbrBR   = input.color (color.new(#FF0000,  0), title = 'Break'                  ,   group = 'Fair Value Gaps'  , inline = 'FVGbr'                                 )
+
+//NWOG/NDOG
+iNWOG      = input.bool  (           true         , title = ''        , inline='NWOG',   group = 'NWOG/NDOG'                                                           )
+cNWOG1     = input.color (color.new(#ff5252, 28), title = 'NWOG    ', inline='NWOG',   group = 'NWOG/NDOG'                                                           )
+cNWOG2     = input.color (color.new(#b2b5be, 50), title = ''        , inline='NWOG',   group = 'NWOG/NDOG'                                                           )
+maxNWOG    = input.int   (             3          , title = 'Show max', inline='NWOG',   group = 'NWOG/NDOG'                , minval = 0, maxval =  50                 )
+
+iNDOG      = input.bool  (           false        , title = ''        , inline='NDOG',   group = 'NWOG/NDOG'                                                           )
+cNDOG1     = input.color (color.new(#ff9800, 20), title = 'NDOG    ', inline='NDOG',   group = 'NWOG/NDOG'                                                           )
+cNDOG2     = input.color (color.new(#4dd0e1, 65), title =    ''     , inline='NDOG',   group = 'NWOG/NDOG'                                                           )
+maxNDOG    = input.int   (             1          , title = 'Show max', inline='NDOG',   group = 'NWOG/NDOG'                , minval = 0, maxval =  50                 )
+
+//Fibonacci
+iFib       = input.string(           'NONE'      , title = 'Fibonacci between last: ',   group = 'Fibonacci', options=['FVG', 'BPR', 'OB', 'Liq', 'VI', 'NWOG', 'NONE'])
+iExt       = input.bool  (           false       , title = 'Extend lines'            ,   group = 'Fibonacci'                                                           )
+
+//Killzones
+showKZ     = input.bool  (           false        , title = 'Show Killzones'         ,   group = 'Killzones'                                                           )
+//New York
+showNy     = input.bool  (           true         , title = ny_      , inline = 'ny' ,   group = 'Killzones'                                                           ) and showKZ
+nyCss      = input.color (color.new(#ff5d00, 93), title = ''       , inline = 'ny' ,   group = 'Killzones'                                                           )
+//London Open
+showLdno   = input.bool  (           true         , title = lo_      , inline = 'lo' ,   group = 'Killzones'                                                           ) and showKZ
+ldnoCss    = input.color (color.new(#00bcd4, 93), title = ''       , inline = 'lo' ,   group = 'Killzones'                                                           )
+//London Close
+showLdnc   = input.bool  (           true         , title = lc_      , inline = 'lc' ,   group = 'Killzones'                                                           ) and showKZ
+ldncCss    = input.color (color.new(#2157f3, 93), title = ''       , inline = 'lc' ,   group = 'Killzones'                                                           )
+//Asian
+showAsia   = input.bool  (           true         , title = as_ + sp2, inline = 'as' ,   group = 'Killzones'                                                           ) and showKZ
+asiaCss    = input.color (color.new(#e91e63, 93), title = ''       , inline = 'as' ,   group = 'Killzones'                                                           )
+
+//-----------------------------------------------------------------------------}
+//General Calculations
+//-----------------------------------------------------------------------------{
+n          =                      bar_index
+hi         =                      high
+lo         =                      low
+tf_msec    = timeframe.in_seconds(timeframe.period) * 1000
+maxSize    =        50
+atr        = ta.atr(10)
+per        = i_mode == 'Present' ? last_bar_index - bar_index <=  500 : true
+perB       = last_bar_index - bar_index <= 1000  ? true : false
+xloc       = iFib   ==   'OB'    ? xloc.bar_time : xloc.bar_index
+ext        = iExt                ?  extend.right : extend.none
+plus       = iFib   ==   'OB'    ?  tf_msec * 50 : 50
+mx         = math.max(close , open)
+mn         = math.min(close , open)
+body       = math.abs(close - open)
+meanBody   = ta.sma  (body  ,  len)
+max        = useBody ?  mx  : high
+min        = useBody ?  mn  : low
+blBrkConf  = 0
+brBrkConf  = 0
+r          = color.r(chart.bg_color)
+g          = color.g(chart.bg_color)
+b          = color.b(chart.bg_color)
+isDark     = r < 80 and g < 80 and b < 80
+
+//-----------------------------------------------------------------------------}
+//User Defined Types
+//-----------------------------------------------------------------------------{
+type ZZ
+    int   [] d
+    int   [] x
+    float [] y
+    bool  [] b
+
+type ln_d
+    line  l
+    int   d
+
+type _2ln_lb
+    line  l1
+    line  l2
+    label lb
+
+type bx_ln
+    box   b
+    line  l
+
+type bx_ln_lb
+    box   bx
+    line  ln
+    label lb
+
+type mss
+    int     dir
+    line [] l_mssBl
+    line [] l_mssBr
+    line [] l_bosBl
+    line [] l_bosBr
+    label[] lbMssBl
+    label[] lbMssBr
+    label[] lbBosBl
+    label[] lbBosBr
+
+type liq
+    box   bx
+    bool  broken
+    bool  brokenTop
+    bool  brokenBtm
+    line  ln
+
+type ob
+    float   top       = na
+    float   btm       = na
+    int     loc       = bar_index
+    bool    breaker   = false
+    int     break_loc = na
+
+type swing
+    float y = na
+    int   x = na
+    bool  crossed = false
+
+type FVG
+    box box
+    bool active
+    int  pos
+
+var mss MSS = mss.new(
+ 0
+ , array.new < line  >()
+ , array.new < line  >()
+ , array.new < line  >()
+ , array.new < line  >()
+ , array.new < label >()
+ , array.new < label >()
+ , array.new < label >()
+ , array.new < label >()
+ )
+
+//-----------------------------------------------------------------------------}
+//Variables
+//-----------------------------------------------------------------------------{
+maxVimb = 2
+
+var float friCp = na, var int friCi = na // Friday Close price/index
+var float monOp = na, var int monOi = na // Monday Open  price/index
+
+var float prDCp = na, var int prDCi = na // Previous Day Open price/index
+var float cuDOp = na, var int cuDOi = na // Current  Day Open price/index
+
+var _2ln_lb [] Vimbal     = array.new<  _2ln_lb >()
+
+var   liq   [] b_liq_B    = array.new<    liq   >(1, liq.new(box(na), false, false, false, line(na)))
+var   liq   [] b_liq_S    = array.new<    liq   >(1, liq.new(box(na), false, false, false, line(na)))
+
+var    ob   [] bullish_ob = array.new<    ob    >()
+var    ob   [] bearish_ob = array.new<    ob    >()
+
+var bx_ln   [] bl_NWOG    = array.new<   bx_ln  >()
+var bx_ln   [] bl_NDOG    = array.new<   bx_ln  >()
+
+var bx_ln_lb[] a_bx_ln_lb = array.new< bx_ln_lb >()
+
+var FVG     [] bFVG_UP    = array.new<    FVG   >()
+var FVG     [] bFVG_DN    = array.new<    FVG   >()
+
+var FVG     [] bBPR_UP    = array.new<    FVG   >()
+var FVG     [] bBPR_DN    = array.new<    FVG   >()
+
+var  ZZ         aZZ       =
+ ZZ.new(
+ array.new < int    >(maxSize,  0),
+ array.new < int    >(maxSize,  0),
+ array.new < float  >(maxSize, na),
+ array.new < bool   >(maxSize, na))
+
+var line _diag = line.new(na, na, na, na, color=color.new(color.silver, 50), style=line.style_dashed, xloc= xloc            )
+var line _vert = line.new(na, na, na, na, color=color.new(color.silver, 50), style=line.style_dotted, xloc= xloc            )
+var line _zero = line.new(na, na, na, na, color=color.new(color.silver,  5), style=line.style_solid , xloc= xloc, extend=ext)
+var line _0236 = line.new(na, na, na, na, color=color.new(color.orange, 25), style=line.style_solid , xloc= xloc, extend=ext)
+var line _0382 = line.new(na, na, na, na, color=color.new(color.yellow, 25), style=line.style_solid , xloc= xloc, extend=ext)
+var line _0500 = line.new(na, na, na, na, color=color.new(color.green , 25), style=line.style_solid , xloc= xloc, extend=ext)
+var line _0618 = line.new(na, na, na, na, color=color.new(color.yellow, 25), style=line.style_solid , xloc= xloc, extend=ext)
+var line _0786 = line.new(na, na, na, na, color=color.new(color.orange, 25), style=line.style_solid , xloc= xloc, extend=ext)
+var line _one_ = line.new(na, na, na, na, color=color.new(color.silver,  5), style=line.style_solid , xloc= xloc, extend=ext)
+var line _1618 = line.new(na, na, na, na, color=color.new(color.yellow, 25), style=line.style_solid , xloc= xloc, extend=ext)
+
+//-----------------------------------------------------------------------------}
+//Functions/methods
+//-----------------------------------------------------------------------------{
+method in_out(ZZ aZZ, int d, int x1, float y1, int x2, float y2, color col, bool b) =>
+    aZZ.d.unshift(d), aZZ.x.unshift(x2), aZZ.y.unshift(y2), aZZ.b.unshift(b), aZZ.d.pop(), aZZ.x.pop(), aZZ.y.pop(), aZZ.b.pop()
+
+method timeinrange(string res, string sess) => not na(time(timeframe.period, res, sess))
+
+method setLine(line ln, int x1, float y1, int x2, float y2) => ln.set_xy1(x1, y1), ln.set_xy2(x2, y2)
+
+method clear_aLine(line[] l) =>
+    if l.size() > 0
+        for i = l.size() -1 to 0
+            l.pop().delete()
+
+method clear_aLabLin(label[] l) =>
+    if l.size() > 0
+        for i = l.size() -1 to 0
+            l.pop().delete()
+
+method clear_aLabLin(line[] l) =>
+    if l.size() > 0
+        for i = l.size() -1 to 0
+            l.pop().delete()
+
+method notransp(color css) => color.rgb(color.r(css), color.g(css), color.b(css))
+
+method display(ob id, css, break_css, str)=>
+    if showOB
+        if id.breaker
+            a_bx_ln_lb.unshift(
+             bx_ln_lb.new(
+               box.new(id.loc, id.top, timenow + (tf_msec * 10), id.btm, na
+             , bgcolor = break_css
+             , extend  = extend.none
+             , xloc    = xloc.bar_time)
+             , line (na)
+             , label(na))
+             )
+        else
+            y  = str == 'bl' ? id.btm : id.top
+            s  = str == 'bl' ? label.style_label_up : label.style_label_down
+            a_bx_ln_lb.unshift(
+             bx_ln_lb.new(
+               box(na)
+             , line.new(id.loc,   y  , id.loc  + (tf_msec * 10),    y
+             , xloc    = xloc.bar_time, color=css, width=2)
+             , label.new(              id.loc  + (tf_msec * 10),    y
+             , text  = str == 'bl' ? '+OB' : '-OB'
+             , xloc  = xloc.bar_time
+             , style = s    , color = color(na)
+             , textcolor=css, size  = size.small))
+             )
+
+swings(len)=>
+    var os = 0
+    var swing top = swing.new(na, na)
+    var swing btm = swing.new(na, na)
+
+    upper = ta.highest(len)
+    lower = ta.lowest(len)
+
+    os := high[len] > upper ? 0
+       :  low [len] < lower ? 1 : os
+
+    if os == 0 and os[1] != 0
+        top := swing.new(high[length], bar_index[length])
+
+    if os == 1 and os[1] != 1
+        btm := swing.new(low[length], bar_index[length])
+
+    [top, btm]
+
+set_lab(i, str) =>
+    style = str == 'Bl' ? label.style_label_down : label.style_label_up
+    txcol = str == 'Bl' ? color.lime : color.red
+    label.new(math.round(math.avg(aZZ.x.get(i), n)), aZZ.y.get(i), text='BOS'
+     , style=style, color=color(na), textcolor=txcol, size=size.tiny)
+set_lin(i, str) =>
+    color = str == 'Bl' ? color.lime : color.red
+    line.new(aZZ.x.get(i), aZZ.y.get(i), n, aZZ.y.get(i), color=color, style=line.style_dotted)
+
+draw(left, col) =>
+    //
+    max_bars_back(time, 1000)
+    var int dir= na, var int x1= na, var float y1= na, var int x2= na, var float y2= na
+    //
+    sz       = aZZ.d.size( )
+    x2      := bar_index -1
+    ph       = ta.pivothigh(hi, left, 1)
+    pl       = ta.pivotlow (lo, left, 1)
+    if ph
+        dir := aZZ.d.get (0)
+        x1  := aZZ.x.get (0)
+        y1  := aZZ.y.get (0)
+        y2  :=      nz(hi[1])
+        //
+        if dir <  1  // if previous point was a pl, add, and change direction ( 1)
+            aZZ.in_out( 1, x1, y1, x2, y2, col, true)
+        else
+            if dir ==  1 and ph > y1
+                aZZ.x.set(0, x2), aZZ.y.set(0, y2)
+        //
+        // liquidity
+        if showLq and per and sz > 0
+            count = 0
+            st_P  = 0.
+            st_B  = 0
+            minP  = 0.
+            maxP  = 10e6
+            for i = 0 to math.min(sz, 50) -1
+                if aZZ.d.get(i) ==  1
+                    if aZZ.y.get(i) > ph + (atr/a)
+                        break
+                    else
+                        if aZZ.y.get(i) > ph - (atr/a) and aZZ.y.get(i) < ph + (atr/a)
+                            count += 1
+                            st_B := aZZ.x.get(i)
+                            st_P := aZZ.y.get(i)
+                            if aZZ.y.get(i) > minP
+                                minP := aZZ.y.get(i)
+                            if aZZ.y.get(i) < maxP
+                                maxP := aZZ.y.get(i)
+            if count > 2
+                getB = b_liq_B.get(0)
+                if st_B == getB.bx.get_left()
+                    getB.bx.set_top(math.avg(minP, maxP) + (atr/a))
+                    getB.bx.set_rightbottom(n +10, math.avg(minP, maxP) - (atr/a))
+                else
+                    b_liq_B.unshift(liq.new(
+                     box.new(
+                       st_B, math.avg(minP, maxP) + (atr/a), n +10, math.avg(minP, maxP) - (atr/a)
+                     , text = 'Buyside liquidity', text_size = size.tiny, text_halign = text.align_left
+                     , text_valign = text.align_bottom, text_color = color.new(cLIQ_B, 25)
+                     , bgcolor=color(na), border_color=color(na)
+                      )
+                     , false
+                     , false
+                     , false
+                     , line.new(st_B, st_P, n -1, st_P, color = color.new(cLIQ_B, 0))
+                      )
+                     )
+                if b_liq_B.size() > visLiq
+                    getLast = b_liq_B.pop()
+                    getLast.bx.delete()
+                    getLast.ln.delete()
+    //
+    if pl
+        dir := aZZ.d.get (0)
+        x1  := aZZ.x.get (0)
+        y1  := aZZ.y.get (0)
+        y2  :=      nz(lo[1])
+        //
+        if dir > -1  // if previous point was a ph, add, and change direction (-1)
+            aZZ.in_out(-1, x1, y1, x2, y2, col, true)
+        else
+            if dir == -1 and pl < y1
+                aZZ.x.set(0, x2), aZZ.y.set(0, y2)
+        //
+        //Liquidity
+        if showLq and per and sz > 0
+            count = 0
+            st_P  = 0.
+            st_B  = 0
+            minP  = 0.
+            maxP  = 10e6
+            for i = 0 to math.min(sz, 50) -1
+                if aZZ.d.get(i) == -1
+                    if aZZ.y.get(i) < pl - (atr/a)
+                        break
+                    else
+                        if aZZ.y.get(i) > pl - (atr/a) and aZZ.y.get(i) < pl + (atr/a)
+                            count += 1
+                            st_B := aZZ.x.get(i)
+                            st_P := aZZ.y.get(i)
+                            if aZZ.y.get(i) > minP
+                                minP := aZZ.y.get(i)
+                            if aZZ.y.get(i) < maxP
+                                maxP := aZZ.y.get(i)
+            if count > 2
+                getB = b_liq_S.get(0)
+                if st_B == getB.bx.get_left()
+                    getB.bx.set_top(math.avg(minP, maxP) + (atr/a))
+                    getB.bx.set_rightbottom(n +10, math.avg(minP, maxP) - (atr/a))
+                else
+                    b_liq_S.unshift(liq.new(
+                      box.new(
+                       st_B, math.avg(minP, maxP) + (atr/a), n +10, math.avg(minP, maxP) - (atr/a)
+                     , text = 'Sellside liquidity', text_size = size.tiny, text_halign = text.align_left
+                     , text_valign = text.align_bottom, text_color = color.new(cLIQ_S, 25)
+                     , bgcolor=color(na), border_color=color(na)
+                      )
+                     , false
+                     , false
+                     , false
+                     , line.new(st_B, st_P, n -1, st_P, color = color.new(cLIQ_S, 0))
+                      )
+                     )
+                if b_liq_S.size() > visLiq
+                    getLast = b_liq_S.pop()
+                    getLast.bx.delete()
+                    getLast.ln.delete()
+    //
+    //Market Structure Shift
+    if showMS
+        //
+        iH = aZZ.d.get(2) ==  1 ? 2 : 1
+        iL = aZZ.d.get(2) == -1 ? 2 : 1
+        //
+        switch
+            // MSS Bullish
+            close > aZZ.y.get(iH) and aZZ.d.get(iH) ==  1 and MSS.dir <  1 =>
+                MSS.dir :=  1
+                if i_mode == 'Present'
+                    MSS.l_bosBl.clear_aLabLin(), MSS.l_bosBr.clear_aLabLin()
+                    MSS.lbBosBl.clear_aLabLin(), MSS.lbBosBr.clear_aLabLin()
+                    MSS.l_mssBl.clear_aLabLin(), MSS.l_mssBr.clear_aLabLin()
+                    MSS.lbMssBl.clear_aLabLin(), MSS.lbMssBr.clear_aLabLin()
+                //
+                MSS.l_mssBl.unshift(line.new (
+                  aZZ.x.get(iH), aZZ.y.get(iH), n, aZZ.y.get(iH), color=cMSSbl))
+                MSS.lbMssBl.unshift(label.new(
+                  math.round(math.avg(aZZ.x.get(iH), n)), aZZ.y.get(iH), text ='MSS'
+                  , style=label.style_label_down, size=size.tiny, color=color(na), textcolor=cMSSbl))
+            // MSS Bearish
+            close < aZZ.y.get(iL) and aZZ.d.get(iL) == -1 and MSS.dir > -1 =>
+                MSS.dir := -1
+                if i_mode == 'Present'
+                    MSS.l_bosBl.clear_aLabLin(), MSS.l_bosBr.clear_aLabLin()
+                    MSS.lbBosBl.clear_aLabLin(), MSS.lbBosBr.clear_aLabLin()
+                    MSS.l_mssBl.clear_aLabLin(), MSS.l_mssBr.clear_aLabLin()
+                    MSS.lbMssBl.clear_aLabLin(), MSS.lbMssBr.clear_aLabLin()
+                //
+                MSS.l_mssBr.unshift(line.new (
+                  aZZ.x.get(iL), aZZ.y.get(iL), n, aZZ.y.get(iL), color=cMSSbr))
+                MSS.lbMssBr.unshift(label.new(
+                  math.round(math.avg(aZZ.x.get(iL), n)), aZZ.y.get(iL), text ='MSS'
+                  , style=label.style_label_up  , size=size.tiny, color=color(na), textcolor=cMSSbr))
+            // BOS Bullish
+            MSS.dir ==  1 and close > aZZ.y.get(iH) and iBOS =>
+                if MSS.l_bosBl.size() > 0
+                    if aZZ.y.get(iH) != MSS.l_bosBl.get(0).get_y2() and
+                       aZZ.y.get(iH) != MSS.l_mssBl.get(0).get_y2()
+                        MSS.l_bosBl.unshift(set_lin(iH, 'Bl')), MSS.lbBosBl.unshift(set_lab(iH, 'Bl'))
+                else
+                    if aZZ.y.get(iH) != MSS.l_mssBl.get(0).get_y2()
+                        MSS.l_bosBl.unshift(set_lin(iH, 'Bl')), MSS.lbBosBl.unshift(set_lab(iH, 'Bl'))
+            // BOS Bearish
+            MSS.dir == -1 and close < aZZ.y.get(iL) and iBOS =>
+                if MSS.l_bosBr.size() > 0
+                    if aZZ.y.get(iL) != MSS.l_bosBr.get(0).get_y2() and
+                       aZZ.y.get(iL) != MSS.l_mssBr.get(0).get_y2()
+                        MSS.l_bosBr.unshift(set_lin(iL, 'Br')), MSS.lbBosBr.unshift(set_lab(iL, 'Br'))
+                else
+                    if aZZ.y.get(iL) != MSS.l_mssBr.get(0).get_y2()
+                        MSS.l_bosBr.unshift(set_lin(iL, 'Br')), MSS.lbBosBr.unshift(set_lab(iL, 'Br'))
+        if not iMSS
+            MSS.l_mssBl.get(0).set_color(color(na)), MSS.lbMssBl.get(0).set_textcolor(color(na))
+            MSS.l_mssBr.get(0).set_color(color(na)), MSS.lbMssBr.get(0).set_textcolor(color(na))
+
+
+
+//-----------------------------------------------------------------------------}
+//Calculations
+//-----------------------------------------------------------------------------{
+draw(len, color.yellow)
+
+if MSS.l_bosBl.size() > 200
+    MSS.l_bosBl.pop().delete()
+    MSS.lbBosBl.pop().delete()
+
+if MSS.l_bosBr.size() > 200
+    MSS.l_bosBr.pop().delete()
+    MSS.lbBosBr.pop().delete()
+
+//Killzones
+ny          = time(timeframe.period, input.session('0700-0900', '', inline = 'ny', group = 'Killzones'), 'America/New_York') and showNy
+ldn_open    = time(timeframe.period, input.session('0700-1000', '', inline = 'lo', group = 'Killzones'), 'Europe/London'   ) and showLdno // 0200-0500 UTC-5
+ldn_close   = time(timeframe.period, input.session('1500-1700', '', inline = 'lc', group = 'Killzones'), 'Europe/London'   ) and showLdnc // 1000-1200 UTC-5
+asian       = time(timeframe.period, input.session('1000-1400', '', inline = 'as', group = 'Killzones'), 'Asia/Tokyo'      ) and showAsia // 2000-0000 UTC-5
+
+//Pivotpoints
+ph          = ta.pivothigh(3, 1), lPh = fixnan(ph)
+pl          = ta.pivotlow (3, 1), lPl = fixnan(pl)
+
+//Candles
+L_body      =
+ high - mx  < body * perc_Body and
+ mn - low   < body * perc_Body
+
+L_bodyUP    =   body > meanBody  and L_body and close > open
+L_bodyDN    =   body > meanBody  and L_body and close < open
+
+bsNOTbodyUP = ta.barssince(not L_bodyUP)
+bsNOTbodyDN = ta.barssince(not L_bodyDN)
+
+bsIs_bodyUP = ta.barssince(    L_bodyUP)
+bsIs_bodyDN = ta.barssince(    L_bodyDN)
+
+lwst        = math.min(lPh [bsNOTbodyUP[1]], low[bsNOTbodyUP[1]])
+hgst        = math.max(high[bsNOTbodyDN[1]], lPl[bsNOTbodyDN[1]])
+
+//Imbalance
+imbalanceUP = L_bodyUP[1] and (i_FVG == 'FVG' ? low  > high[2] : low  < high[2])
+imbalanceDN = L_bodyDN[1] and (i_FVG == 'FVG' ? high < low [2] : high > low [2])
+
+//Volume Imbalance
+vImb_Bl     = open > close[1] and high[1] > low  and close > close[1] and open > open[1] and high[1] < mn
+vImb_Br     = open < close[1] and low [1] < high and close < close[1] and open < open[1] and low [1] > mx
+
+if sVimbl
+    if vImb_Bl
+        Vimbal.unshift(
+         _2ln_lb.new(
+          line.new (n -1, mx[1], n +3, mx[1], color=cVimbl)
+         , line.new (n   , mn   , n +3, mn   , color=cVimbl)
+          , label.new(n +3, math.avg    (mx[1], mn), text='VI'
+         , color=color(na) , textcolor=cVimbl, style=label.style_label_left)
+          )
+         )
+    if vImb_Br
+        Vimbal.unshift(
+         _2ln_lb.new(
+          line.new (n -1, mn[1], n +3, mn[1], color=cVimbl)
+         , line.new (n   , mx   , n +3, mx   , color=cVimbl)
+          , label.new(n +3, math.avg    (mn[1], mx), text='VI'
+         , color=color(na) , textcolor=cVimbl, style=label.style_label_left)
+          )
+         )
+    if Vimbal.size() > visVim
+        pop = Vimbal.pop()
+        pop.l1.delete()
+        pop.l2.delete()
+        pop.lb.delete()
+
+//Fair Value Gap
+if barstate.isfirst
+    for i = 0 to visBxs -1
+        bFVG_UP.unshift(FVG.new(box(na), false))
+        bFVG_DN.unshift(FVG.new(box(na), false))
+        if i_BPR
+            bBPR_UP.unshift(FVG.new(box(na), false))
+            bBPR_DN.unshift(FVG.new(box(na), false))
+
+if imbalanceUP and per and shwFVG
+    if imbalanceUP[1]
+        bFVG_UP.get(0).box.set_lefttop    (n -2, low    )
+        bFVG_UP.get(0).box.set_rightbottom(n +8, high[2])
+    else
+        bFVG_UP.unshift(FVG.new(
+          box.new(
+           n -2
+         ,    i_FVG == 'FVG' ? low : high[2]
+         , n, i_FVG == 'FVG' ? high[2] : low
+         , bgcolor     = i_BPR ? color(na) : color.new(cFVGbl, 90)
+         , border_color= i_BPR ? color(na) : color.new(cFVGbl, 65)
+         , text_color  = i_BPR ? color(na) : color.new(cFVGbl, 65)
+         , text_size=size.small
+         , text=i_FVG
+         )
+         , true)
+         )
+        bFVG_UP.pop().box.delete()
+
+if imbalanceDN and per and shwFVG
+    if imbalanceDN[1]
+        bFVG_DN.get(0).box.set_lefttop    (n -2, low[2])
+        bFVG_DN.get(0).box.set_rightbottom(n +8, high  )
+    else
+        bFVG_DN.unshift(FVG.new(
+         box.new(
+           n -2
+         ,    i_FVG == 'FVG' ? low[2] : high
+         , n, i_FVG == 'FVG' ? high   : low[2]
+         , bgcolor     = i_BPR ? color(na) : color.new(cFVGbr, 90)
+         , border_color= i_BPR ? color(na) : color.new(cFVGbr, 65)
+         , text_color  = i_BPR ? color(na) : color.new(cFVGbr, 65)
+         , text_size=size.small
+         , text=i_FVG
+         )
+         , true)
+         )
+        bFVG_DN.pop().box.delete()
+
+//Balance Price Range (overlap of 2 latest FVG bull/bear)
+if i_BPR and bFVG_UP.size() > 0 and bFVG_DN.size() > 0
+    bxUP    = bFVG_UP.get(0)
+    bxDN    = bFVG_DN.get(0)
+    bxUPbtm = bxUP.box.get_bottom()
+    bxDNbtm = bxDN.box.get_bottom()
+    bxUPtop = bxUP.box.get_top()
+    bxDNtop = bxDN.box.get_top()
+    left    = math.min(bxUP.box.get_left (), bxDN.box.get_left ())
+    right   = math.max(bxUP.box.get_right(), bxDN.box.get_right())
+    //
+    if bxUPbtm < bxDNtop and
+       bxDNbtm < bxUPbtm
+        if left == bBPR_UP.get(0).box.get_left()
+            if  bBPR_UP.get(0).active
+                bBPR_UP.get(0).box.set_right(right)
+        else
+            bBPR_UP.unshift(FVG.new(
+             box.new(
+              left, bxDNtop, right, bxUPbtm
+              , bgcolor     = i_BPR ? color.new(cFVGbl, 90) : color(na)
+              , border_color= i_BPR ? color.new(cFVGbl, 65) : color(na)
+              , text_color  = i_BPR ? color.new(cFVGbl, 65) : color(na)
+              , text_size=size.small
+              , text= 'BPR'
+              )
+              , true
+              , close > bxUPbtm ? 1 : close < bxDNtop ? -1 : 0
+              )
+             )
+            bBPR_UP.pop().box.delete()
+    //
+    if bxDNbtm < bxUPtop and
+       bxUPbtm < bxDNbtm
+        if left == bBPR_DN.get(0).box.get_left()
+            if  bBPR_DN.get(0).active
+                bBPR_DN.get(0).box.set_right(right)
+        else
+            bBPR_DN.unshift(FVG.new(
+             box.new(
+              left, bxUPtop, right, bxDNbtm
+              , bgcolor     = i_BPR ? color.new(cFVGbr, 90) : color(na)
+              , border_color= i_BPR ? color.new(cFVGbr, 65) : color(na)
+              , text_color  = i_BPR ? color.new(cFVGbr, 65) : color(na)
+              , text_size=size.small
+              , text= 'BPR'
+              )
+              , true
+              , close > bxDNbtm ? 1 : close < bxUPtop ? -1 : 0
+              )
+             )
+            bBPR_DN.pop().box.delete()
+
+//FVG's breaks
+for i = 0 to math.min(bxBack, bFVG_UP.size() -1)
+    getUPi = bFVG_UP.get(i)
+    if getUPi.active
+        getUPi.box.set_right(bar_index +8)
+        if low  < getUPi.box.get_top() and not i_BPR
+            getUPi.box.set_border_style(line.style_dashed)
+        if low  < getUPi.box.get_bottom()
+            if not i_BPR
+                getUPi.box.set_bgcolor(color.new(cFVGblBR, 95))
+                getUPi.box.set_border_style(line.style_dotted)
+            getUPi.box.set_right(bar_index)
+            getUPi.active := false
+
+for i = 0 to math.min(bxBack, bFVG_DN.size() -1)
+    getDNi = bFVG_DN.get(i)
+    if getDNi.active
+        getDNi.box.set_right(bar_index +8)
+        if high > getDNi.box.get_bottom() and not i_BPR
+            getDNi.box.set_border_style(line.style_dashed)
+        if high > getDNi.box.get_top()
+            if not i_BPR
+                getDNi.box.set_bgcolor(color.new(cFVGbrBR, 95))
+                getDNi.box.set_border_style(line.style_dotted)
+            getDNi.box.set_right(bar_index)
+            getDNi.active := false
+
+if i_BPR
+    for i = 0 to math.min(bxBack, bBPR_UP.size() -1)
+        getUPi = bBPR_UP.get(i)
+        if getUPi.active
+            getUPi.box.set_right(bar_index +8)
+            switch getUPi.pos
+                -1 =>
+                    if high > getUPi.box.get_bottom()
+                        getUPi.box.set_border_style(line.style_dashed)
+                    if high > getUPi.box.get_top   ()
+                        getUPi.box.set_bgcolor(color.new(cFVGblBR, 95))
+                        getUPi.box.set_border_style(line.style_dotted)
+                        getUPi.box.set_right(bar_index)
+                        getUPi.active := false
+                1 =>
+                    if low  < getUPi.box.get_top   ()
+                        getUPi.box.set_border_style(line.style_dashed)
+                    if low  < getUPi.box.get_bottom()
+                        getUPi.box.set_bgcolor(color.new(cFVGblBR, 95))
+                        getUPi.box.set_border_style(line.style_dotted)
+                        getUPi.box.set_right(bar_index)
+                        getUPi.active := false
+
+    for i = 0 to math.min(bxBack, bBPR_DN.size() -1)
+        getDNi = bBPR_DN.get(i)
+        if getDNi.active
+            getDNi.box.set_right(bar_index +8)
+            switch getDNi.pos
+                -1 =>
+                    if high > getDNi.box.get_bottom()
+                        getDNi.box.set_border_style(line.style_dashed)
+                    if high > getDNi.box.get_top   ()
+                        getDNi.box.set_bgcolor(color.new(cFVGbrBR, 95))
+                        getDNi.box.set_border_style(line.style_dotted)
+                        getDNi.box.set_right(bar_index)
+                        getDNi.active := false
+                1 =>
+                    if low  < getDNi.box.get_top   ()
+                        getDNi.box.set_border_style(line.style_dashed)
+                    if low  < getDNi.box.get_bottom()
+                        getDNi.box.set_bgcolor(color.new(cFVGbrBR, 95))
+                        getDNi.box.set_border_style(line.style_dotted)
+                        getDNi.box.set_right(bar_index)
+                        getDNi.active := false
+
+//NWOG/NDOG
+if barstate.isfirst
+    for i = 0 to maxNWOG -1
+        bl_NWOG.unshift(bx_ln.new(box(na), line(na)))
+    for i = 0 to maxNDOG -1
+        bl_NDOG.unshift(bx_ln.new(box(na), line(na)))
+
+if dayofweek == dayofweek.friday
+    friCp := close, friCi := n
+
+if ta.change(dayofweek)
+    if  dayofweek == dayofweek.monday and iNWOG
+        monOp := open , monOi := n
+        bl_NWOG.unshift(bx_ln.new(
+         box.new(
+           friCi        ,   math.max (friCp  , monOp  )
+         , monOi        ,   math.min (friCp  , monOp  )
+         , bgcolor      =   color    ( na             )
+         , border_color =             cNWOG2
+         , extend       =             extend.right    )
+         ,
+         line.new(
+           monOi        ,   math.avg (friCp  , monOp  )
+         , monOi +1     ,   math.avg (friCp  , monOp  )
+         , color        =             cNWOG1
+         , style        =             line.style_dotted
+         , extend       =             extend.right    )
+         ))
+        bl = bl_NWOG.pop(), bl.b.delete(), bl.l.delete()
+    if iNDOG
+        cuDOp := open    , cuDOi := n
+        prDCp := close[1], prDCi := n -1
+        //
+        bl_NDOG.unshift(bx_ln.new(
+         box.new(
+           prDCi        ,   math.max (prDCp  , cuDOp  )
+         , cuDOi        ,   math.min (prDCp  , cuDOp  )
+         , bgcolor      =   color    ( na             )
+         , border_color =             cNDOG2
+         , extend       =             extend.right    )
+         ,
+         line.new(
+           cuDOi        ,   math.avg (prDCp  , cuDOp  )
+         , cuDOi +1     ,   math.avg (prDCp  , cuDOp  )
+         , color        =             cNDOG1
+         , style        =             line.style_dotted
+         , extend       =             extend.right    )
+         ))
+        bl = bl_NDOG.pop(), bl.b.delete(), bl.l.delete()
+
+//Liquidity
+for i = 0 to b_liq_B.size() -1
+    x = b_liq_B.get(i)
+    if not x.broken
+        x.bx.set_right(n +3)
+        x.ln.set_x2   (n +3)
+        if not x.brokenTop
+            if close > x.bx.get_top   ()
+                x.brokenTop := true
+        if not x.brokenBtm
+            if close > x.bx.get_bottom()
+                x.brokenBtm := true
+        if x.brokenBtm
+            x.bx.set_bgcolor(color.new(cLIQ_B, 90))
+            x.ln.delete()
+            if x.brokenTop
+                x.broken := true
+                x.bx.set_right(n)
+
+for i = 0 to b_liq_S.size() -1
+    x = b_liq_S.get(i)
+    if not x.broken
+        x.bx.set_right(n +3)
+        x.ln.set_x2   (n +3)
+        if not x.brokenTop
+            if close < x.bx.get_top   ()
+                x.brokenTop := true
+        if not x.brokenBtm
+            if close < x.bx.get_bottom()
+                x.brokenBtm := true
+        if x.brokenTop
+            x.bx.set_bgcolor(color.new(cLIQ_S, 90))
+            x.ln.delete()
+            if x.brokenBtm
+                x.broken := true
+                x.bx.set_right(n)
+
+//Order Blocks
+[top, btm] = swings(length)
+
+if showOB and per
+    if close > top.y and not top.crossed
+        top.crossed := true
+
+        minima = max[1]
+        maxima = min[1]
+        loc = time[1]
+
+        for i = 1 to (n - top.x)-1
+            minima := math.min(min[i], minima)
+            maxima := minima == min[i] ? max[i] : maxima
+            loc := minima == min[i] ? time[i] : loc
+        bullish_ob.unshift(ob.new(maxima, minima, loc))
+
+    if bullish_ob.size() > 0
+        for i = bullish_ob.size()-1 to 0
+            element = bullish_ob.get(i)
+
+            if not element.breaker
+                if math.min(close, open) < element.btm
+                    element.breaker := true
+                    element.break_loc := time
+            else
+                if close > element.top
+                    bullish_ob.remove(i)
+                else if i < showBull and top.y < element.top and top.y > element.btm
+                    blBrkConf := 1
+
+    //Set label
+    if blBrkConf > blBrkConf[1] and showLabels
+        label.new(top.x, top.y, '▼', color = na
+          , textcolor = bearCss.notransp()
+          , style = label.style_label_down
+          , size = size.tiny)
+
+if showOB and per
+    if close < btm.y and not btm.crossed
+        btm.crossed := true
+
+        minima = min[1]
+        maxima = max[1]
+        loc = time[1]
+
+        for i = 1 to (n - btm.x)-1
+            maxima := math.max(max[i], maxima)
+            minima := maxima == max[i] ? min[i] : minima
+            loc := maxima == max[i] ? time[i] : loc
+        bearish_ob.unshift(ob.new(maxima, minima, loc))
+
+    if bearish_ob.size() > 0
+        for i = bearish_ob.size()-1 to 0
+            element = bearish_ob.get(i)
+
+            if not element.breaker
+                if math.max(close, open) > element.top
+                    element.breaker := true
+                    element.break_loc := time
+            else
+                if close < element.btm
+                    bearish_ob.remove(i)
+                else if i < showBear and btm.y > element.btm and btm.y < element.top
+                    brBrkConf := 1
+
+    //Set label
+    if brBrkConf > brBrkConf[1] and showLabels
+        label.new(btm.x, btm.y, '▲', color = na
+          , textcolor = bullCss.notransp()
+          , style = label.style_label_up
+          , size = size.tiny)
+
+//-----------------------------------------------------------------------------}
+//Set Order Blocks
+//-----------------------------------------------------------------------------{
+if barstate.islast and showOB
+    if a_bx_ln_lb.size() > 0
+        for i = a_bx_ln_lb.size() -1 to 0
+            item = a_bx_ln_lb.remove(i)
+            item.bx.delete()
+            item.ln.delete()
+            item.lb.delete()
+    //Bullish
+    if showBull > 0
+        blSz = bullish_ob.size()
+        if blSz > 0
+            for i = 0 to math.min(showBull, bullish_ob.size()) -1
+                get_ob = bullish_ob.get(i)
+                get_ob.display(bullCss, bullBrkCss, 'bl')
+    //Bearish
+    if showBear > 0
+        brSz = bearish_ob.size()
+        if brSz > 0
+            for i = 0 to math.min(showBear, bearish_ob.size()) -1
+                get_ob = bearish_ob.get(i)
+                get_ob.display(bearCss, bearBrkCss, 'br')
+
+//-----------------------------------------------------------------------------}
+//Fibonacci
+//-----------------------------------------------------------------------------{
+if barstate.islast
+    x1 = 0, y1 = 0., x2 = 0, y2 = 0., box up = na, box dn = na
+    switch iFib
+        'FVG'   =>
+            if bFVG_UP.size() > 0 and bFVG_DN.size() > 0
+                up  := bFVG_UP.get(0).box
+                dn  := bFVG_DN.get(0).box
+                dnFirst = up.get_left() > dn.get_left()
+                dnBottm = up.get_top () > dn.get_top ()
+                x1  := dnFirst ? dn.get_left  () : up.get_left  ()
+                x2  := dnFirst ? up.get_right () : dn.get_right ()
+                y1  := dnFirst ?
+                 dnBottm       ? dn.get_bottom() : dn.get_top   () :
+                 dnBottm       ? up.get_top   () : up.get_bottom()
+                y2  := dnFirst ?
+                 dnBottm       ? up.get_top   () : up.get_bottom() :
+                 dnBottm       ? dn.get_bottom() : dn.get_top   ()
+        'BPR'   =>
+            if bBPR_UP.size() > 0 and bBPR_DN.size() > 0
+                up  := bBPR_UP.get(0).box
+                dn  := bBPR_DN.get(0).box
+                dnFirst = up.get_left() > dn.get_left()
+                dnBottm = up.get_top () > dn.get_top ()
+                x1  := dnFirst ? dn.get_left  () : up.get_left  ()
+                x2  := dnFirst ? up.get_right () : dn.get_right ()
+                y1  := dnFirst ?
+                 dnBottm       ? dn.get_bottom() : dn.get_top   () :
+                 dnBottm       ? up.get_top   () : up.get_bottom()
+                y2  := dnFirst ?
+                 dnBottm       ? up.get_top   () : up.get_bottom() :
+                 dnBottm       ? dn.get_bottom() : dn.get_top   ()
+        'OB'    =>
+            oSz = a_bx_ln_lb.size()
+            if oSz > 1
+                xA = nz(
+                   a_bx_ln_lb.get(oSz -1).ln.get_x1    ()
+                 , a_bx_ln_lb.get(oSz -1).bx.get_left  ()
+                 )
+                xB = nz(
+                   a_bx_ln_lb.get(oSz -2).ln.get_x1    ()
+                 , a_bx_ln_lb.get(oSz -2).bx.get_left  ()
+                 )
+                AFirst = xB > xA
+                //
+                yAT = nz(
+                   a_bx_ln_lb.get(oSz -1).ln.get_y1    ()
+                 , a_bx_ln_lb.get(oSz -1).bx.get_top   ()
+                 )
+                yAB = nz(
+                   a_bx_ln_lb.get(oSz -1).ln.get_y1    ()
+                 , a_bx_ln_lb.get(oSz -1).bx.get_bottom()
+                 )
+                yBT = nz(
+                   a_bx_ln_lb.get(oSz -2).ln.get_y1    ()
+                 , a_bx_ln_lb.get(oSz -2).bx.get_top   ()
+                 )
+                yBB = nz(
+                   a_bx_ln_lb.get(oSz -2).ln.get_y1    ()
+                 , a_bx_ln_lb.get(oSz -2).bx.get_bottom()
+                 )
+                ABottom = yAB < yBB
+                //
+                x1  := AFirst ? xA : xB
+                x2  := AFirst ? xB : xA
+                y1  := AFirst ?
+                 ABottom ? yAB : yAT :
+                 ABottom ? yBT : yBB
+                y2  := AFirst ?
+                 ABottom ? yBT : yBB :
+                 ABottom ? yAB : yAT
+        'Liq'   =>
+            if b_liq_B.size() > 0 and b_liq_S.size() > 0
+                xA = nz(
+                   b_liq_B.get(0).ln.get_x1    ()
+                 , b_liq_B.get(0).bx.get_left  ()
+                 )
+                xB = nz(
+                   b_liq_S.get(0).ln.get_x1    ()
+                 , b_liq_S.get(0).bx.get_left  ()
+                 )
+                AFirst = xB > xA
+                //
+                yAT = nz(
+                   b_liq_B.get(0).ln.get_y1    ()
+                 , b_liq_B.get(0).bx.get_top   ()
+                 )
+                yAB = nz(
+                   b_liq_B.get(0).ln.get_y1    ()
+                 , b_liq_B.get(0).bx.get_bottom()
+                 )
+                yBT = nz(
+                   b_liq_S.get(0).ln.get_y1    ()
+                 , b_liq_S.get(0).bx.get_top   ()
+                 )
+                yBB = nz(
+                   b_liq_S.get(0).ln.get_y1    ()
+                 , b_liq_S.get(0).bx.get_bottom()
+                 )
+                ABottom = yAB < yBB
+                //
+                x1  := AFirst ? xA : xB
+                x2  := AFirst ? xB : xA
+                y1  := AFirst ?
+                 ABottom ? yAB : yAT :
+                 ABottom ? yBT : yBB
+                y2  := AFirst ?
+                 ABottom ? yBT : yBB :
+                 ABottom ? yAB : yAT
+        'VI'    =>
+            if Vimbal.size() > 1
+                AxA = Vimbal.get(1).l2.get_x1(), AxB = Vimbal.get(1).l1.get_x1()
+                BxA = Vimbal.get(0).l2.get_x1(), BxB = Vimbal.get(0).l1.get_x1()
+                AyA = Vimbal.get(1).l2.get_y1(), AyB = Vimbal.get(1).l1.get_y1()
+                ByA = Vimbal.get(0).l2.get_y1(), ByB = Vimbal.get(0).l1.get_y1()
+                ABt = math.min(ByA, ByB) > math.min(AyA, AyB)
+                x1 := math.max(AxA, AxB)
+                x2 := math.max(BxA, BxB)
+                y1 := ABt ? math.min(AyA, AyB) : math.max(AyA, AyB)
+                y2 := ABt ? math.max(ByA, ByB) : math.min(ByA, ByB)
+        'NWOG'  =>
+            if bl_NWOG.size() > 1
+                up  := bl_NWOG.get(0).b
+                dn  := bl_NWOG.get(1).b
+                dnFirst = up.get_left() > dn.get_left()
+                dnBottm = up.get_top () > dn.get_top ()
+                x1  := dnFirst ? dn.get_left () : up.get_left ()
+                x2  := dnFirst ? up.get_right() : dn.get_right()
+                y1  := dnFirst ?
+                 dnBottm ? dn.get_bottom() : dn.get_top   () :
+                 dnBottm ? up.get_top   () : up.get_bottom()
+                y2  := dnFirst ?
+                 dnBottm ? up.get_top   () : up.get_bottom() :
+                 dnBottm ? dn.get_bottom() : dn.get_top   ()
+    //
+    if iFib != 'NONE'
+        rt = math.max(x1, x2)
+        lt = math.min(x1, x2)
+        tp = math.max(y1, y2)
+        bt = math.min(y1, y2)
+        _0 = rt == x1 ? y1 : y2
+        _1 = rt == x1 ? y2 : y1
+        //
+        df = _1 - _0
+        m0236 = df * 0.236
+        m0382 = df * 0.382
+        m0500 = df * 0.500
+        m0618 = df * 0.618
+        m0786 = df * 0.786
+        m1618 = df * 1.618
+        //
+        _diag.setLine(x1, y1        , x2       , y2        )
+        _vert.setLine(rt, _0        , rt       , _0 + m1618)
+        _zero.setLine(rt, _0        , rt + plus, _0        )
+        _0236.setLine(rt, _0 + m0236, rt + plus, _0 + m0236)
+        _0382.setLine(rt, _0 + m0382, rt + plus, _0 + m0382)
+        _0500.setLine(rt, _0 + m0500, rt + plus, _0 + m0500)
+        _0618.setLine(rt, _0 + m0618, rt + plus, _0 + m0618)
+        _0786.setLine(rt, _0 + m0786, rt + plus, _0 + m0786)
+        _one_.setLine(rt, _1        , rt + plus, _1        )
+        _1618.setLine(rt, _0 + m1618, rt + plus, _0 + m1618)
+
+//-----------------------------------------------------------------------------}
+//Displacement
+//-----------------------------------------------------------------------------{
+plotshape(sDispl ? per       ?
+     L_bodyUP    ? low  : na : na : na
+     , title     = 'Displacement UP'
+     , style     = shape.labelup
+     , color     = color.lime
+     , location  = location.belowbar)
+plotshape(sDispl ? per       ?
+     L_bodyDN    ? high : na : na : na
+     , title     = 'Displacement DN'
+     , style     = shape.labeldown
+     , color     = color.red
+     , location  = location.abovebar)
+
+//-----------------------------------------------------------------------------}
+//background - Killzones
+//-----------------------------------------------------------------------------{
+bgcolor  (per    ? ny        ? nyCss   : na : na, editable = false)
+bgcolor  (per    ? ldn_open  ? ldnoCss : na : na, editable = false)
+bgcolor  (per    ? ldn_close ? ldncCss : na : na, editable = false)
+bgcolor  (per    ? asian     ? asiaCss : na : na, editable = false)
+
+//-----------------------------------------------------------------------------}
+
+//=============================================================================
+// MODULE 3: Supply and Demand Visible Range [LuxAlgo]
+//=============================================================================
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+sd_on = input.bool(true, 'Enable Supply & Demand', group = 'Supply & Demand (visible range)')
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------{
+sd_per = input.float(10., 'Threshold %', group = 'Supply & Demand (visible range)', minval = 0, maxval = 100)
+sd_div = input.int(50, 'Resolution', group = 'Supply & Demand (visible range)', minval = 2, maxval = 500)
+sd_tf  = input.timeframe('', 'Intrabar TF', group = 'Supply & Demand (visible range)')
+
+//Colors
+sd_showSupply = input(true ,'Supply        ', inline = 'sd_supply', group = 'Supply & Demand (visible range)')
+sd_supplyCss  = input(#2157f3, ''         , inline = 'sd_supply', group = 'Supply & Demand (visible range)')
+sd_supplyArea = input(true ,'Area'          , inline = 'sd_supply', group = 'Supply & Demand (visible range)')
+sd_supplyAvg  = input(true ,'Average'       , inline = 'sd_supply', group = 'Supply & Demand (visible range)')
+sd_supplyWavg = input(true ,'Weighted'      , inline = 'sd_supply', group = 'Supply & Demand (visible range)')
+
+sd_showEqui   = input(true ,'Equilibrium'   , inline = 'sd_equi'  , group = 'Supply & Demand (visible range)')
+sd_equiCss    = input(color.gray, ''      , inline = 'sd_equi'  , group = 'Supply & Demand (visible range)')
+sd_equiAvg    = input(true ,'Average'       , inline = 'sd_equi'  , group = 'Supply & Demand (visible range)')
+sd_equiWavg   = input(true ,'Weighted'      , inline = 'sd_equi'  , group = 'Supply & Demand (visible range)')
+
+sd_showDemand = input(true ,'Demand    '    , inline = 'sd_demand', group = 'Supply & Demand (visible range)')
+sd_demandCss  = input(#ff5d00, ''         , inline = 'sd_demand', group = 'Supply & Demand (visible range)')
+sd_demandArea = input(true ,'Area'          , inline = 'sd_demand', group = 'Supply & Demand (visible range)')
+sd_demandAvg  = input(true ,'Average'       , inline = 'sd_demand', group = 'Supply & Demand (visible range)')
+sd_demandWavg = input(true ,'Weighted'      , inline = 'sd_demand', group = 'Supply & Demand (visible range)')
+
+//-----------------------------------------------------------------------------}
+//UDT's
+//-----------------------------------------------------------------------------{
+type sd_bin
+    float lvl
+    float prev
+    float sum
+    float prev_sum
+    float csum
+    float avg
+    bool isreached
+
+type sd_area_t
+    box  bx
+    line avg
+    line wavg
+
+//-----------------------------------------------------------------------------}
+//Functions
+//-----------------------------------------------------------------------------{
+
+sd_get_hlv()=> [high, low, volume]
+
+method sd_set_area(sd_area_t id, sd_x1, top, btm, avg, wavg, showArea, showAvg, showWavg)=>
+    if showArea
+        id.bx.set_lefttop(sd_x1, top)
+        id.bx.set_rightbottom(n, btm)
+
+    if showAvg
+        id.avg.set_xy1(sd_x1, avg)
+        id.avg.set_xy2(n, avg)
+
+    if showWavg
+        id.wavg.set_xy1(sd_x1, wavg)
+        id.wavg.set_xy2(n, wavg)
+
+//-----------------------------------------------------------------------------}
+//Main variables
+//-----------------------------------------------------------------------------{
+var sd_max  = 0.
+var sd_min  = 0.
+var sd_x1   = 0
+var sd_csum = 0.
+
+//Intrabar data
+[sd_h, sd_l, sd_v] = request.security_lower_tf(syminfo.tickerid, sd_tf, sd_get_hlv())
+
+//Init on left bar
+if time == chart.left_visible_bar_time
+    sd_max := high
+    sd_min := low
+    sd_csum := volume
+    sd_x1 := n
+else //Accumulate
+    sd_max := math.max(high, sd_max)
+    sd_min := math.min(low, sd_min)
+    sd_csum += volume
+
+//-----------------------------------------------------------------------------}
+//Set zones
+//-----------------------------------------------------------------------------{
+var sd_supply_area = sd_area_t.new(
+  box.new(na, na, na, na, na, bgcolor = color.new(sd_supplyCss, 80))
+  , line.new(na, na, na, na, color = sd_supplyCss)
+  , line.new(na, na, na, na, color = sd_supplyCss, style = line.style_dashed))
+
+var sd_demand_area = sd_area_t.new(
+  box.new(na, na, na, na, na, bgcolor = color.new(sd_demandCss, 80))
+  , line.new(na, na, na, na, color = sd_demandCss)
+  , line.new(na, na, na, na, color = sd_demandCss, style = line.style_dashed))
+
+var sd_equi  = line.new(na, na, na, na, color = sd_equiCss)
+var sd_wequi = line.new(na, na, na, na, color = sd_equiCss, style = line.style_dashed)
+
+var float sd_supply_wavg = na
+var float sd_demand_wavg = na
+
+if sd_on and time == chart.right_visible_bar_time
+    sd_r = (sd_max - sd_min) / sd_div
+    sd_supply = sd_bin.new(sd_max, sd_max, 0, 0, 0, 0, false)
+    sd_demand = sd_bin.new(sd_min, sd_min, 0, 0, 0, 0, false)
+
+    //Loop trough intervals
+    for i = 0 to sd_div-1
+        sd_supply.lvl -= sd_r
+        sd_demand.lvl += sd_r
+
+        //Accumulated volume column
+        if not sd_supply.isreached and sd_showSupply and sd_supplyArea
+            box.new(sd_x1, sd_supply.prev, sd_x1 + int(sd_supply.sum / sd_csum * (n - sd_x1)), sd_supply.lvl, na
+              , bgcolor = color.new(sd_supplyCss, 50))
+
+        if not sd_demand.isreached and sd_showDemand and sd_demandArea
+            box.new(sd_x1, sd_demand.lvl, sd_x1 + int(sd_demand.sum / sd_csum * (n - sd_x1)), sd_demand.prev, na
+              , bgcolor = color.new(sd_demandCss, 50))
+
+        //Loop trough bars
+        for j = 0 to (n - sd_x1)-1
+            //Loop trough intrabars
+            for k = 0 to (sd_v[j]).size()-1
+                //Accumulate if within upper internal
+                sd_supply.sum      += (sd_h[j]).get(k) > sd_supply.lvl and (sd_h[j]).get(k) < sd_supply.prev ? (sd_v[j]).get(k) : 0
+                sd_supply.avg      += sd_supply.lvl * (sd_supply.sum - sd_supply.prev_sum)
+                sd_supply.csum     += sd_supply.sum - sd_supply.prev_sum
+                sd_supply.prev_sum := sd_supply.sum
+
+                //Accumulate if within lower interval
+                sd_demand.sum      += (sd_l[j]).get(k) < sd_demand.lvl and (sd_l[j]).get(k) > sd_demand.prev ? (sd_v[j]).get(k) : 0
+                sd_demand.avg      += sd_demand.lvl * (sd_demand.sum - sd_demand.prev_sum)
+                sd_demand.csum     += sd_demand.sum - sd_demand.prev_sum
+                sd_demand.prev_sum := sd_demand.sum
+
+            //Test if sd_supply accumulated volume exceed threshold and set box
+            if sd_supply.sum / sd_csum * 100 > sd_per and not sd_supply.isreached
+                avg = math.avg(sd_max, sd_supply.lvl)
+                sd_supply_wavg := sd_supply.avg / sd_supply.csum
+
+                //Set Box/Level coordinates
+                if sd_showSupply
+                    sd_supply_area.sd_set_area(sd_x1, sd_max, sd_supply.lvl, avg, sd_supply_wavg, sd_supplyArea, sd_supplyAvg, sd_supplyWavg)
+
+                sd_supply.isreached := true
+
+            //Test if sd_demand accumulated volume exceed threshold and set box
+            if sd_demand.sum / sd_csum * 100 > sd_per and not sd_demand.isreached and sd_showDemand
+                avg = math.avg(sd_min, sd_demand.lvl)
+                sd_demand_wavg := sd_demand.avg / sd_demand.csum
+
+                //Set Box/Level coordinates
+                if sd_showDemand
+                    sd_demand_area.sd_set_area(sd_x1, sd_demand.lvl, sd_min, avg, sd_demand_wavg, sd_demandArea, sd_demandAvg, sd_demandWavg)
+
+                sd_demand.isreached := true
+
+            if sd_supply.isreached and sd_demand.isreached
+                break
+
+        if sd_supply.isreached and sd_demand.isreached and sd_showEqui
+            //Set equilibrium
+            if sd_equiAvg
+                avg = math.avg(sd_max, sd_min)
+                sd_equi.set_xy1(sd_x1, avg)
+                sd_equi.set_xy2(n, avg)
+
+            //Set weighted equilibrium
+            if sd_equiWavg
+                wavg = math.avg(sd_supply_wavg, sd_demand_wavg)
+                sd_wequi.set_xy1(sd_x1, wavg)
+                sd_wequi.set_xy2(n, wavg)
+
+            break
+
+        sd_supply.prev := sd_supply.lvl
+        sd_demand.prev := sd_demand.lvl
+
+//-----------------------------------------------------------------------------}
+
+//=============================================================================
+// MODULE 4: Liquidity Swings [LuxAlgo]
+//=============================================================================
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+ls_on = input.bool(true, 'Enable Liquidity Swings', group = 'Liquidity Swings')
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------{
+ls_length = input(14, 'Pivot Lookback', group = 'Liquidity Swings')
+
+ls_area = input.string('Wick Extremity', 'Swing Area', options = ['Wick Extremity', 'Full Range'], group = 'Liquidity Swings')
+
+ls_intra = input(false, 'Intrabar Precision', inline = 'intrabar', group = 'Liquidity Swings')
+ls_tf = input.timeframe('1', ''              , inline = 'intrabar', group = 'Liquidity Swings')
+
+ls_filterBy = input.string('Count', 'Filter Areas By', options = ['Count', 'Volume'], inline = 'filter', group = 'Liquidity Swings')
+ls_filterVal   = input.float(0, ''                                            , inline = 'filter', group = 'Liquidity Swings')
+
+//Style
+ls_showTop      = input(true, 'Swing High'              , inline = 'ls_topV', group = 'Liquidity Swings')
+ls_topCss       = input(color.red, ''                   , inline = 'ls_topV', group = 'Liquidity Swings')
+ls_topAreaCss   = input(color.new(color.red, 50), 'Area', inline = 'ls_topV', group = 'Liquidity Swings')
+
+ls_showBtm      = input(true, 'Swing Low'                , inline = 'ls_btmV', group = 'Liquidity Swings')
+ls_btmCss       = input(color.teal, ''                   , inline = 'ls_btmV', group = 'Liquidity Swings')
+ls_btmAreaCss   = input(color.new(color.teal, 50), 'Area', inline = 'ls_btmV', group = 'Liquidity Swings')
+
+ls_labelSize = input.string('Tiny', 'Labels Size', options = ['Tiny', 'Small', 'Normal'], group = 'Liquidity Swings')
+
+//-----------------------------------------------------------------------------}
+//Functions
+//-----------------------------------------------------------------------------{
+
+ls_get_data()=> [high, low, volume]
+
+[ls_h, ls_l, ls_v] = request.security_lower_tf(syminfo.tickerid, ls_tf, ls_get_data())
+
+ls_get_counts(condition, ls_topV, ls_btmV)=>
+    var count = 0
+    var vol = 0.
+
+    if condition
+        count := 0
+        vol := 0.
+    else
+        if ls_intra
+            if n > ls_length
+                if array.size(ls_v[ls_length]) > 0
+                    for [index, element] in ls_v[ls_length]
+                        vol += array.get(ls_l[ls_length], index) < ls_topV and array.get(ls_h[ls_length], index) > ls_btmV ? element : 0
+        else
+            vol += low[ls_length] < ls_topV and high[ls_length] > ls_btmV ? volume[ls_length] : 0
+
+        count += low[ls_length] < ls_topV and high[ls_length] > ls_btmV ? 1 : 0
+
+    [count, vol]
+
+ls_set_label(count, vol, x, y, css, lbl_style)=>
+    var label lbl = na
+    var label_size = switch ls_labelSize
+        'Tiny' => size.tiny
+        'Small' => size.small
+        'Normal' => size.normal
+
+    target = switch ls_filterBy
+        'Count'  => count
+        'Volume' => vol
+
+    if ta.crossover(target, ls_filterVal)
+        lbl := label.new(x, y, str.tostring(vol, format.volume)
+          , style = lbl_style
+          , size = label_size
+          , color = #00000000
+          , textcolor = css)
+
+    if target > ls_filterVal
+        label.set_text(lbl, str.tostring(vol, format.volume))
+
+ls_set_level(condition, crossed, value, count, vol, css)=>
+    var line lvl = na
+
+    target = switch ls_filterBy
+        'Count'  => count
+        'Volume' => vol
+
+    if condition
+        if target[1] < ls_filterVal[1]
+            line.delete(lvl[1])
+        else if not crossed[1]
+            line.set_x2(lvl, n - ls_length)
+
+        lvl := line.new(n - ls_length, value, n, value
+          , color = na)
+
+    if not crossed[1]
+        line.set_x2(lvl, n+3)
+
+    if crossed and not crossed[1]
+        line.set_x2(lvl, n)
+        line.set_style(lvl, line.style_dashed)
+
+    if target > ls_filterVal
+        line.set_color(lvl, css)
+
+ls_set_zone(condition, x, ls_topV, ls_btmV, count, vol, css)=>
+    var box bx = na
+
+    target = switch ls_filterBy
+        'Count'  => count
+        'Volume' => vol
+
+    if ta.crossover(target, ls_filterVal)
+        bx := box.new(x, ls_topV, x + count, ls_btmV
+          , border_color = na
+          , bgcolor = css)
+
+    if target > ls_filterVal
+        box.set_right(bx, x + count)
+
+//-----------------------------------------------------------------------------}
+//Global variables
+//-----------------------------------------------------------------------------{
+//Pivot high
+var float ph_top = na
+var float ph_btm = na
+var bool  ph_crossed = false
+var       ph_x1 = 0
+var box   ph_bx = box.new(na,na,na,na
+  , bgcolor = color.new(ls_topAreaCss, 80)
+  , border_color = na)
+
+//Pivot low
+var float pl_top = na
+var float pl_btm = na
+var bool  pl_crossed = false
+var       pl_x1 = 0
+var box   pl_bx = box.new(na,na,na,na
+  , bgcolor = color.new(ls_btmAreaCss, 80)
+  , border_color = na)
+
+//-----------------------------------------------------------------------------}
+//Display pivot high levels/blocks
+//-----------------------------------------------------------------------------{
+ls_ph = ta.pivothigh(ls_length, ls_length)
+
+//Get ls_ph counts
+[ph_count, ph_vol] = ls_get_counts(ls_ph, ph_top, ph_btm)
+
+//Set ls_ph ls_area and level
+if ls_ph and ls_showTop and ls_on
+    ph_top := high[ls_length]
+    ph_btm := switch ls_area
+        'Wick Extremity' => math.max(close[ls_length], open[ls_length])
+        'Full Range' => low[ls_length]
+
+    ph_x1 := n - ls_length
+    ph_crossed := false
+
+    box.set_lefttop(ph_bx, ph_x1, ph_top)
+    box.set_rightbottom(ph_bx, ph_x1, ph_btm)
+else
+    ph_crossed := close > ph_top ? true : ph_crossed
+
+    if ph_crossed
+        box.set_right(ph_bx, ph_x1)
+    else
+        box.set_right(ph_bx, n+3)
+
+if ls_showTop and ls_on
+    //Set ls_ph zone
+    ls_set_zone(ls_ph, ph_x1, ph_top, ph_btm, ph_count, ph_vol, ls_topAreaCss)
+
+    //Set ls_ph level
+    ls_set_level(ls_ph, ph_crossed, ph_top, ph_count, ph_vol, ls_topCss)
+
+    //Set ls_ph label
+    ls_set_label(ph_count, ph_vol, ph_x1, ph_top, ls_topCss, label.style_label_down)
+
+//-----------------------------------------------------------------------------}
+//Display pivot low levels/blocks
+//-----------------------------------------------------------------------------{
+ls_pl = ta.pivotlow(ls_length, ls_length)
+
+//Get ls_pl counts
+[pl_count, pl_vol] = ls_get_counts(ls_pl, pl_top, pl_btm)
+
+//Set ls_pl ls_area and level
+if ls_pl and ls_showBtm and ls_on
+    pl_top := switch ls_area
+        'Wick Extremity' => math.min(close[ls_length], open[ls_length])
+        'Full Range' => high[ls_length]
+    pl_btm := low[ls_length]
+
+    pl_x1 := n - ls_length
+    pl_crossed := false
+
+    box.set_lefttop(pl_bx, pl_x1, pl_top)
+    box.set_rightbottom(pl_bx, pl_x1, pl_btm)
+else
+    pl_crossed := close < pl_btm ? true : pl_crossed
+
+    if pl_crossed
+        box.set_right(pl_bx, pl_x1)
+    else
+        box.set_right(pl_bx, n+3)
+
+if ls_showBtm and ls_on
+    //Set ls_pl zone
+    ls_set_zone(ls_pl, pl_x1, pl_top, pl_btm, pl_count, pl_vol, ls_btmAreaCss)
+
+    //Set ls_pl level
+    ls_set_level(ls_pl, pl_crossed, pl_btm, pl_count, pl_vol, ls_btmCss)
+
+    //Set ls_pl labels
+    ls_set_label(pl_count, pl_vol, pl_x1, pl_btm, ls_btmCss, label.style_label_up)
+
+//-----------------------------------------------------------------------------}
