@@ -30,14 +30,14 @@ BRENT = "BRENT"
 NATGAS = "NatGas_SPOT"
 
 [brokers."Raw Trading Ltd"]
-note = "IC Markets (ICMarketsSC-MT5-4, ICMarketsSC-Demo). Verified from trade history 2026-10-12; indices use the .cash names (USTEC is also listed on some servers)."
+note = "IC Markets (ICMarketsSC-MT5-4, ICMarketsSC-Demo). Verified from trade history 2026-10-12. Indices and energy use plain names with no .cash suffix (USTEC, DE40, XTIUSD, XBRUSD on ICMarketsSC-Demo, 2026-11-02); auto-detection maps them."
 patterns = []
 [brokers."Raw Trading Ltd".explicit]
 XAUUSD = "XAUUSD"
 XAGUSD = "XAGUSD"
 
 [brokers."Equiti Securities Currencies Brokers L.L.C"]
-note = "EquitiSecurities-Live. Verified from trade history 2026-10-12; US30Roll/UT100Roll are rolling contracts chosen over dated ones."
+note = "EquitiSecurities-Live. Verified from trade history 2026-10-12 and the ReyLens Market Watch catalog; US30Roll/UT100Roll/UKOILRoll are rolling contracts chosen over dated ones."
 patterns = [{ match = "^([A-Z]{6})$", replace = "${1}.pr" }]
 [brokers."Equiti Securities Currencies Brokers L.L.C".explicit]
 XAUUSD = "XAUUSD.pr"
@@ -45,6 +45,7 @@ XAGUSD = "XAGUSD.pr"
 BTCUSD = "BTCUSD.lv"
 US30 = "US30Roll"
 US100 = "UT100Roll"
+BRENT = "UKOILRoll"
 
 [brokers."Kira Financial Brokers L.L.C"]
 note = "KiraFinancialBrokers-Live. Verified from trade history 2026-10-12. No blanket pattern: EURUSD, XAGUSD, BTCUSD, ETHUSD trade under their own names."
