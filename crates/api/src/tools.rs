@@ -682,6 +682,8 @@ impl ToolRegistry {
                 intent: ctx.intent.clone(),
             },
             persona: ctx.persona.clone(),
+            // Chat orders give a volume; sizing by risk from chat is not wired up yet.
+            risk_percent: None,
         };
         match trading.propose(request).await {
             Ok(preview) => ToolOutcome {

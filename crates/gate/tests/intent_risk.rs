@@ -26,12 +26,24 @@ fn risk_phrases_are_read() {
     // (utterance, risk, sl)
     let cases = [
         ("buy gold risking 1% with a stop at 3900", 1.0, Some(3900.0)),
-        ("buy gold risking 1 % with a stop at 3900", 1.0, Some(3900.0)),
+        (
+            "buy gold risking 1 % with a stop at 3900",
+            1.0,
+            Some(3900.0),
+        ),
         ("buy gold 1% risk stop loss 3900", 1.0, Some(3900.0)),
-        ("buy gold with 1 percent risk and a stop at 3900", 1.0, Some(3900.0)),
+        (
+            "buy gold with 1 percent risk and a stop at 3900",
+            1.0,
+            Some(3900.0),
+        ),
         ("buy gold, risk 0.5 percent, sl 3900", 0.5, Some(3900.0)),
         ("buy gold 0.5% risk sl 3900", 0.5, Some(3900.0)),
-        ("sell nasdaq risking one percent stop at 19900", 1.0, Some(19900.0)),
+        (
+            "sell nasdaq risking one percent stop at 19900",
+            1.0,
+            Some(19900.0),
+        ),
         ("sell nasdaq risk of 1.5 percent", 1.5, None),
         ("buy euro risking zero point five percent", 0.5, None),
         ("buy gold risking 2 per cent sl 3900", 2.0, Some(3900.0)),
@@ -74,7 +86,10 @@ fn lots_and_risk_are_told_apart() {
 #[test]
 fn a_percent_sign_elsewhere_changes_nothing() {
     let f = facts("buy 0.1 gold at 2350");
-    assert_eq!((f.volume, f.price, f.risk_percent), (Some(0.1), Some(2350.0), None));
+    assert_eq!(
+        (f.volume, f.price, f.risk_percent),
+        (Some(0.1), Some(2350.0), None)
+    );
     assert_eq!(parse("what is 5% of 200", &aliases()), Intent::Other);
 }
 
@@ -132,10 +147,7 @@ fn a_risk_the_user_never_said_is_refused_when_they_said_lots() {
     );
     // The plain volume still works.
     assert_eq!(cross_check(&said, &proposal(0.1)), Ok(()));
-    assert_eq!(
-        field_of(cross_check(&said, &proposal(0.2))),
-        Some("volume")
-    );
+    assert_eq!(field_of(cross_check(&said, &proposal(0.2))), Some("volume"));
 }
 
 #[test]

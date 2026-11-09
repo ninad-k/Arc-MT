@@ -856,6 +856,17 @@ pub(crate) async fn propose_from_ui(
     session: Option<&crate::auth::Session>,
     action: ProposedAction,
 ) -> Result<Json<PreviewDto>, ApiError> {
+    propose_sized_from_ui(state, session, action, None).await
+}
+
+/// [`propose_from_ui`] for a new order whose volume is worked out from `risk_percent` of
+/// equity and its stop loss (`None`: the action's own volume is used).
+pub(crate) async fn propose_sized_from_ui(
+    state: &AppState,
+    session: Option<&crate::auth::Session>,
+    action: ProposedAction,
+    risk_percent: Option<f64>,
+) -> Result<Json<PreviewDto>, ApiError> {
     // The audit rows of a button press carry the persona the user has active.
     let settings = state.user_settings(session).await;
     let preview = state
@@ -866,6 +877,7 @@ pub(crate) async fn propose_from_ui(
             voice: false,
             source: ProposeSource::Ui,
             persona: Some(state.persona_for(&settings).id.clone()),
+            risk_percent,
         })
         .await?;
     Ok(Json(preview))

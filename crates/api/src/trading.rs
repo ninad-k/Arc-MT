@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use jarvis_bridge_client::protocol::{
-    Command, DealType, HISTORY_LIMIT_MAX, HistoryQuery, Position, TRADE_RETCODE_DONE,
+    Command, DealType, HISTORY_LIMIT_MAX, HistoryQuery, Position, Side, TRADE_RETCODE_DONE,
     TRADE_RETCODE_DONE_PARTIAL, TRADE_RETCODE_PLACED, TradeResult,
 };
 use jarvis_bridge_client::{BridgeClient, BridgeError};
@@ -58,6 +58,7 @@ use crate::config::TradingConfig;
 use crate::events::{Event, EventBus};
 use crate::limit_overrides::{self, PartialLimits};
 use crate::ratelimit::RateLimiter;
+use crate::sizing::{self, SizingDto, SizingInput};
 use crate::state::ModeMonitor;
 
 /// `/api/confirm` allowance: this many requests per minute per client key.
@@ -91,11 +92,19 @@ pub struct PreviewDto {
     pub stage: TokenStage,
     pub expires_at_ms: i64,
     pub timing: TokenTiming,
+    /// How the lot size was worked out, when the order was sized by risk; otherwise null.
+    pub sizing: Option<SizingDto>,
 }
 
 impl PreviewDto {
-    fn new(preview: &ActionPreview, issued: &IssuedToken, timing: TokenTiming) -> Self {
+    fn new(
+        preview: &ActionPreview,
+        issued: &IssuedToken,
+        timing: TokenTiming,
+        sizing: Option<SizingDto>,
+    ) -> Self {
         Self {
+            sizing,
             id: preview.id,
             description: preview.description.clone(),
             symbols: preview.symbols.clone(),
@@ -242,6 +251,9 @@ pub struct ProposeRequest {
     pub source: ProposeSource,
     /// The persona that was active for the request (audit only; it changes no decision).
     pub persona: Option<String>,
+    /// Size a new order from this share of equity and its stop loss instead of its
+    /// `volume` (Prepare trade "Risk %"). The volume is worked out from the snapshot, in code.
+    pub risk_percent: Option<f64>,
 }
 
 /// Who an audit row is about: the chat session and the persona that was active.
@@ -528,12 +540,13 @@ impl Trading {
         if resolved_for.is_some() && resolved_for != broker {
             return Err(TradingError::BrokerChanged);
         }
-        let preview = evaluate(
-            &req.action,
-            &snapshot,
-            &self.gate_limits(),
-            self.kill_switch.is_engaged(),
-        )?;
+        let limits = self.gate_limits();
+        // A risk-sized order gets its volume here; from now on it is an order like any other.
+        let (action, sizing) = size_by_risk(&req.action, req.risk_percent, &snapshot, &limits)?;
+        let mut preview = evaluate(&action, &snapshot, &limits, self.kill_switch.is_engaged())?;
+        if let Some(s) = &sizing {
+            preview.description = format!("{}, {}", preview.description, sizing::describe(s));
+        }
 
         let timing = if req.voice {
             TokenTiming::AfterReadback
@@ -553,7 +566,7 @@ impl Trading {
                     persona: req.persona.clone(),
                     preview_id: preview.id,
                     broker,
-                    action: Some(req.action.clone()),
+                    action: Some(action.clone()),
                     stage: issued.stage,
                     source: source_name(&req.source),
                     issued_ms: now,
@@ -599,10 +612,11 @@ impl Trading {
                 "expires_at_ms": issued.expires_at_ms,
                 "token": token_prefix(&issued.token),
                 "source": source_name(&req.source),
+                "sizing": sizing,
             }),
         )
         .await;
-        Ok(PreviewDto::new(&preview, &issued, timing))
+        Ok(PreviewDto::new(&preview, &issued, timing, sizing))
     }
 
     fn has_live(&self, session: Option<Uuid>) -> bool {
@@ -1584,6 +1598,58 @@ fn token_prefix(token: &str) -> String {
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+/// `action` with its volume worked out from `risk_percent` of equity and its stop loss, or
+/// `action` unchanged when no risk was asked for. Only a new order with a stop can be sized:
+/// the entry is the ask for a buy, the bid for a sell, or the price of a pending order.
+fn size_by_risk(
+    action: &ProposedAction,
+    risk_percent: Option<f64>,
+    snapshot: &MarketSnapshot,
+    limits: &Limits,
+) -> Result<(ProposedAction, Option<SizingDto>), TradingError> {
+    let Some(risk_percent) = risk_percent else {
+        return Ok((action.clone(), None));
+    };
+    let invalid = |m: &str| TradingError::Gate(GateError::Invalid(m.to_owned()));
+    let ProposedAction::Order(order) = action else {
+        return Err(invalid("a risk percentage can only size a new order"));
+    };
+    let stop = order
+        .sl
+        .filter(|s| *s > 0.0)
+        .ok_or_else(|| invalid("a risk-based size needs a stop loss"))?;
+    let spec = snapshot
+        .symbols
+        .get(&order.symbol)
+        .ok_or_else(|| TradingError::Snapshot(format!("no trading specs for {}", order.symbol)))?;
+    let entry = match order.price {
+        Some(price) => price,
+        None => {
+            let quote = snapshot
+                .prices
+                .get(&order.symbol)
+                .ok_or_else(|| TradingError::Snapshot(format!("no price for {}", order.symbol)))?;
+            match order.side {
+                Side::Buy => quote.ask,
+                Side::Sell => quote.bid,
+            }
+        }
+    };
+    let sizing = sizing::size_by_risk(&SizingInput {
+        risk_percent,
+        max_risk_percent: limits.max_risk_percent,
+        side: order.side,
+        entry,
+        stop,
+        equity: snapshot.account.equity,
+        currency: &snapshot.account.currency,
+        spec,
+    })?;
+    let mut sized = order.clone();
+    sized.volume = sizing.volume;
+    Ok((ProposedAction::Order(sized), Some(sizing)))
 }
 
 /// Symbols whose price and trading specs the gate needs for `action`: the traded symbol of

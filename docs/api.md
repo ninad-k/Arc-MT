@@ -249,10 +249,14 @@ ever sent to the browser, never to the LLM.
   "token": "9a0f…64 hex…",
   "stage": "first",
   "expires_at_ms": 1793341578000,
-  "timing": "immediate"
+  "timing": "immediate",
+  "sizing": null
 }
 ```
 
+- `sizing` is set only when a new order's lot size was worked out from a risk percentage
+  (`POST /api/market/prepare` with `risk_percent`): `{"risk_percent", "risk_amount",
+  "currency", "stop_distance", "volume"}`. Otherwise it is `null`.
 - `POST /api/chat` response gains `"preview": PreviewDto | null`. The request gains
   optional `"voice": true`; previews created in a voice turn use timing `after_readback`.
 - `POST /api/confirm/{token}` → one of:
@@ -834,14 +838,15 @@ Turns a view with a setup into an order proposal. It does not send anything and 
 ```
 
 - `view_id` must be a saved view that has not expired and has a setup.
-- `volume` is required, in lots, and must be above 0. There is no default (core rule 9).
+- Give either `volume` (lots, above 0) or `risk_percent` (percent of equity to lose at the setup's stop loss, above 0), never both. There is no default (core rule 9).
+- With `risk_percent`, the backend works the lots out in code: risk amount = equity × risk% / 100, loss per lot = |entry − stop| ÷ tick size × tick value, volume = risk amount ÷ loss per lot, rounded **down** to the volume step. The entry is the ask for a buy, the bid for a sell, or the limit price. A risk above `max_risk_percent` (default 2) is refused, and so is a risk too small for the smallest lot (the message gives both amounts). The worked-out volume then goes through every limit like any other. The preview has a `sizing` object (`risk_percent`, `risk_amount`, `currency`, `stop_distance`, `volume`), and its description ends with, for example, `1% risk (100.71 USD)`. Previews sized by volume have `sizing: null`.
 - `order_type` is required: `market` or `limit`. A `market` order uses the setup's stop loss and take profit 1. A `limit` order is placed at `entry_low` for a buy or `entry_high` for a sell, with the same stop loss and take profit 1. Take profit 2 is not sent.
 
-The reply is a `PreviewDto`, the same shape as every other preview (see [Previews and confirmation](#previews-and-confirmation-sprint-2)), with a confirmation `token` and its 15-second window. The proposal goes through `Trading::propose` with the source set to the UI, so **every limit and the kill switch apply**: `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours and the stops-distance checks. The broker symbol is looked up again at that moment, so a view made on another account maps to the current one. Confirming is the normal `POST /api/confirm/{token}`. A `market_prepare` audit row records the view, the volume and the order type before the gate decides.
+The reply is a `PreviewDto`, the same shape as every other preview (see [Previews and confirmation](#previews-and-confirmation-sprint-2)), with a confirmation `token` and its 15-second window. The proposal goes through `Trading::propose` with the source set to the UI, so **every limit and the kill switch apply**: `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours and the stops-distance checks. The broker symbol is looked up again at that moment, so a view made on another account maps to the current one. Confirming is the normal `POST /api/confirm/{token}`. A `market_prepare` audit row records the view, the volume or risk percentage, and the order type before the gate decides.
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `bad_request` | invalid JSON, a missing `view_id`, a missing or non-positive `volume`, a missing or unknown `order_type`, or a symbol that no longer resolves |
+| 400 | `bad_request` | invalid JSON, a missing `view_id`, a missing or non-positive `volume` or `risk_percent`, both given, a missing or unknown `order_type`, or a symbol that no longer resolves |
 | 404 | `not_found` | no such view |
 | 410 | `view_expired` | the view is past its `valid_until` |
 | 409 | `broker_changed` | the MT5 account changed while the proposal was prepared |

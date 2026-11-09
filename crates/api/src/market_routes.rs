@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::audit::AuditKind;
 use crate::auth::http::MaybeSession;
 use crate::market::{Actor, MarketError, MarketService, PrepareKind};
-use crate::routes::{ApiError, propose_from_ui};
+use crate::routes::{ApiError, propose_sized_from_ui};
 use crate::state::AppState;
 use crate::trading::PreviewDto;
 
@@ -212,11 +212,42 @@ pub async fn journal_get(
 #[serde(deny_unknown_fields)]
 struct PrepareBody {
     view_id: String,
-    /// Required: there is no default size (SPEC rule 9).
+    /// A volume or a risk is required, never both: there is no default size (SPEC rule 9).
     #[serde(default)]
     volume: Option<f64>,
+    /// Percent of equity to risk at the setup's stop loss; the lots are worked out from it.
+    #[serde(default)]
+    risk_percent: Option<f64>,
     #[serde(default)]
     order_type: Option<String>,
+}
+
+/// How a prepared trade is sized.
+#[derive(Debug, Clone, Copy)]
+enum PrepareSize {
+    Volume(f64),
+    RiskPercent(f64),
+}
+
+impl PrepareBody {
+    fn size(&self) -> Result<PrepareSize, ApiError> {
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        match (self.volume, self.risk_percent) {
+            (Some(_), Some(_)) => Err(ApiError::BadRequest(
+                "give either volume or risk_percent, not both".to_owned(),
+            )),
+            (Some(v), None) if positive(v) => Ok(PrepareSize::Volume(v)),
+            (None, Some(r)) if positive(r) => Ok(PrepareSize::RiskPercent(r)),
+            (None, Some(_)) => Err(ApiError::BadRequest(
+                "risk_percent must be greater than 0".to_owned(),
+            )),
+            _ => Err(ApiError::BadRequest(
+                "volume (or risk_percent) is required and must be greater than 0: say how many \
+                 lots to trade or how much of your equity to risk"
+                    .to_owned(),
+            )),
+        }
+    }
 }
 
 pub async fn prepare_post(
@@ -231,15 +262,7 @@ pub async fn prepare_post(
     if view_id.is_empty() {
         return Err(ApiError::BadRequest("view_id is required".to_owned()));
     }
-    let volume = req
-        .volume
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "volume is required and must be greater than 0: say how many lots to trade"
-                    .to_owned(),
-            )
-        })?;
+    let size = req.size()?;
     let kind = req
         .order_type
         .as_deref()
@@ -250,6 +273,10 @@ pub async fn prepare_post(
 
     let settings = state.user_settings(session.as_ref()).await;
     let resolver = state.resolver_for(&settings);
+    let (volume, risk_percent) = match size {
+        PrepareSize::Volume(v) => (Some(v), None),
+        PrepareSize::RiskPercent(r) => (None, Some(r)),
+    };
     let action = market.prepare(&resolver, view_id, volume, kind).await?;
 
     // Noted before the gate decides, so a refused preview still shows which view it came from.
@@ -262,12 +289,13 @@ pub async fn prepare_post(
             json!({
                 "view_id": view_id,
                 "volume": volume,
+                "risk_percent": risk_percent,
                 "order_type": kind.as_str(),
                 "action": serde_json::to_value(&action).unwrap_or(Value::Null),
             }),
         )
         .await;
-    propose_from_ui(&state, session.as_ref(), action).await
+    propose_sized_from_ui(&state, session.as_ref(), action, risk_percent).await
 }
 
 #[cfg(test)]

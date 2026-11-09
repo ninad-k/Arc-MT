@@ -781,20 +781,22 @@ impl MarketService {
 
     /// The order a stored view stands for: a market order with the setup's stop and first
     /// target, or a limit order at the near edge of the entry zone (buy: its low, sell: its
-    /// high). The volume is the caller's; there is no default (SPEC rule 9). The result still
-    /// has to go through `Trading::propose`.
+    /// high). The volume is the caller's; there is no default (SPEC rule 9). `None` leaves the
+    /// volume at 0 for `Trading::propose` to work out from a `risk_percent` (an order still at
+    /// 0 lots is refused by the gate). The result still has to go through `Trading::propose`.
     pub async fn prepare(
         &self,
         resolver: &SymbolResolver,
         view_id: &str,
-        volume: f64,
+        volume: Option<f64>,
         kind: PrepareKind,
     ) -> Result<ProposedAction, MarketError> {
-        if !volume.is_finite() || volume <= 0.0 {
+        if volume.is_some_and(|v| !v.is_finite() || v <= 0.0) {
             return Err(MarketError::Invalid(
                 "volume is required and must be greater than 0".to_owned(),
             ));
         }
+        let volume = volume.unwrap_or(0.0);
         let stored = self
             .journal
             .get(view_id)

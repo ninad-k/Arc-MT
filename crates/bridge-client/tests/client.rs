@@ -28,9 +28,21 @@ async fn started() -> (MockBridge, BridgeClient) {
     (mock, client)
 }
 
+/// A free port for tests that must know the endpoint before the mock binds it.
+///
+/// Picked from 20000..32000, below the ephemeral ranges of Windows (49152+) and Linux
+/// (32768+). Asking the OS for port 0 and releasing it would hand out an ephemeral port
+/// that another test running in parallel can be given before this test binds it again.
 fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.local_addr().expect("addr").port()
+    use std::hash::{BuildHasher, RandomState};
+    let state = RandomState::new();
+    for attempt in 0u64..1000 {
+        let port = 20_000 + (state.hash_one(attempt) % 12_000) as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port in 20000..32000");
 }
 
 #[tokio::test]

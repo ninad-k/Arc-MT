@@ -280,9 +280,23 @@ mod tests {
     fn the_lot_is_rounded_down_never_up() {
         let eur = spec("EURUSD", 5, 0.00001, 1.0, 0.01);
         // 100 / 199.9 = 0.50025 -> 0.50; 100 / 200.1 = 0.4997 -> 0.49.
-        let a = size_by_risk(&input(&eur, Side::Buy, 1.0847, 1.08270 + 0.00001, 10_000.0, 1.0));
+        let a = size_by_risk(&input(
+            &eur,
+            Side::Buy,
+            1.0847,
+            1.08270 + 0.00001,
+            10_000.0,
+            1.0,
+        ));
         assert_eq!(a.unwrap().volume, 0.5);
-        let b = size_by_risk(&input(&eur, Side::Buy, 1.0847, 1.08270 - 0.00001, 10_000.0, 1.0));
+        let b = size_by_risk(&input(
+            &eur,
+            Side::Buy,
+            1.0847,
+            1.08270 - 0.00001,
+            10_000.0,
+            1.0,
+        ));
         assert_eq!(b.unwrap().volume, 0.49);
     }
 
@@ -299,8 +313,8 @@ mod tests {
     fn below_the_smallest_lot_is_refused_with_the_numbers() {
         // 3,920 x 1% = 39.20; stop 52.10 away = 5,210 USD per lot; smallest lot 0.01 risks 52.10.
         let gold = spec("XAUUSD", 2, 0.01, 1.0, 0.01);
-        let err = size_by_risk(&input(&gold, Side::Buy, 3952.10, 3900.00, 3_920.0, 1.0))
-            .unwrap_err();
+        let err =
+            size_by_risk(&input(&gold, Side::Buy, 3952.10, 3900.00, 3_920.0, 1.0)).unwrap_err();
         let GateError::Invalid(m) = err else {
             panic!("expected an invalid request")
         };
@@ -324,7 +338,17 @@ mod tests {
         // The edge itself is fine.
         assert!(size_by_risk(&input(&gold, Side::Buy, 3950.0, 3900.0, 100_000.0, 2.0)).is_ok());
         assert!(size_by_risk(&input(&gold, Side::Buy, 3950.0, 3900.0, 100_000.0, 0.1)).is_ok());
-        assert!(size_by_risk(&input(&gold, Side::Buy, 3950.0, 3900.0, 100_000.0, f64::NAN)).is_err());
+        assert!(
+            size_by_risk(&input(
+                &gold,
+                Side::Buy,
+                3950.0,
+                3900.0,
+                100_000.0,
+                f64::NAN
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -337,14 +361,23 @@ mod tests {
             (Side::Buy, 3950.0, 0.0),
         ] {
             let r = size_by_risk(&input(&gold, side, entry, stop, 100_000.0, 1.0));
-            assert!(matches!(r, Err(GateError::Invalid(_))), "{side:?} {stop}: {r:?}");
+            assert!(
+                matches!(r, Err(GateError::Invalid(_))),
+                "{side:?} {stop}: {r:?}"
+            );
         }
         let mut broken = gold.clone();
         broken.tick_value = 0.0;
         let r = size_by_risk(&input(&broken, Side::Buy, 3950.0, 3900.0, 100_000.0, 1.0));
-        assert!(matches!(&r, Err(GateError::Invalid(m)) if m.contains("tick")), "{r:?}");
+        assert!(
+            matches!(&r, Err(GateError::Invalid(m)) if m.contains("tick")),
+            "{r:?}"
+        );
         let r = size_by_risk(&input(&gold, Side::Buy, 3950.0, 3900.0, 0.0, 1.0));
-        assert!(matches!(&r, Err(GateError::Invalid(m)) if m.contains("equity")), "{r:?}");
+        assert!(
+            matches!(&r, Err(GateError::Invalid(m)) if m.contains("equity")),
+            "{r:?}"
+        );
     }
 
     #[test]

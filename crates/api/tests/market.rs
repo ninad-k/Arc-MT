@@ -1092,6 +1092,109 @@ async fn a_limit_preview_uses_the_near_edge_of_the_entry_zone() {
 }
 
 #[tokio::test]
+async fn a_risk_sized_preview_works_the_lots_out_from_the_stop() {
+    let (mock, app) = app_with_view("v1", "bullish", Some(GOLD_BUY), 3600).await;
+    // Mock: equity 10,070.55 USD; gold ask 2391.40, tick 0.01 = 1.00 USD per lot.
+    // 1% = 100.71 USD. Stop 2380: 11.40 away = 1,140 USD per lot. 100.71 / 1140 = 0.088 -> 0.08.
+    let (status, preview) = post(
+        &app,
+        "/api/market/prepare",
+        json!({ "view_id": "v1", "risk_percent": 1.0, "order_type": "market" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["total_volume"], 0.08, "{preview}");
+    assert_eq!(
+        preview["sizing"],
+        json!({
+            "risk_percent": 1.0,
+            "risk_amount": 100.71,
+            "currency": "USD",
+            "stop_distance": 11.4,
+            "volume": 0.08,
+        })
+    );
+    let description = preview["description"].as_str().unwrap();
+    assert!(
+        description.contains("Buy 0.08 XAUUSD at market")
+            && description.contains("1% risk (100.71 USD)"),
+        "{description}"
+    );
+    assert_eq!(mock.executed_writes(), 0);
+
+    let rows = app.audit.rows(None).await.unwrap();
+    let prepared = rows
+        .iter()
+        .find(|r| r.kind == "market_prepare")
+        .expect("market_prepare row");
+    assert_eq!(prepared.payload["risk_percent"], 1.0);
+
+    // The confirmed order carries the worked-out volume.
+    let token = preview["token"].as_str().unwrap();
+    let (status, confirmed) = post(&app, &format!("/api/confirm/{token}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["results"][0]["volume"], 0.08, "{confirmed}");
+    assert_eq!(mock.executed_writes(), 1);
+}
+
+#[tokio::test]
+async fn a_plain_volume_preview_has_no_sizing() {
+    let (_mock, app) = app_with_view("v1", "bullish", Some(GOLD_BUY), 3600).await;
+    let (status, preview) = post(
+        &app,
+        "/api/market/prepare",
+        json!({ "view_id": "v1", "volume": 0.1, "order_type": "market" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(preview["sizing"].is_null(), "{preview}");
+}
+
+#[tokio::test]
+async fn prepare_takes_a_volume_or_a_risk_never_both() {
+    let (mock, app) = app_with_view("v1", "bullish", Some(GOLD_BUY), 3600).await;
+    for body in [
+        json!({ "view_id": "v1", "volume": 0.1, "risk_percent": 1.0, "order_type": "market" }),
+        json!({ "view_id": "v1", "risk_percent": 0, "order_type": "market" }),
+        json!({ "view_id": "v1", "risk_percent": -1, "order_type": "market" }),
+        json!({ "view_id": "v1", "risk_percent": "1", "order_type": "market" }),
+    ] {
+        let (status, response) = post(&app, "/api/market/prepare", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+    }
+    assert_eq!(mock.executed_writes(), 0);
+}
+
+#[tokio::test]
+async fn a_risk_above_the_limit_or_too_small_for_the_smallest_lot_is_refused() {
+    let (mock, app) = app_with_view("v1", "bullish", Some(GOLD_BUY), 3600).await;
+    // The default max_risk_percent is 2.
+    let (status, response) = post(
+        &app,
+        "/api/market/prepare",
+        json!({ "view_id": "v1", "risk_percent": 3.0, "order_type": "market" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["error"]["code"], "gate_rejected");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("max_risk_percent"), "{message}");
+
+    // 0.1% = 10.07 USD; the smallest lot (0.01) risks 11.40 USD.
+    let (status, response) = post(
+        &app,
+        "/api/market/prepare",
+        json!({ "view_id": "v1", "risk_percent": 0.1, "order_type": "market" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("risks 11.40 USD"), "{message}");
+    assert_eq!(mock.executed_writes(), 0);
+    assert!(!audit_kinds(&app).await.contains(&"preview".to_owned()));
+}
+
+#[tokio::test]
 async fn the_gate_limits_still_apply_to_a_prepared_trade() {
     let (mock, app) = app_with_view("v1", "bullish", Some(GOLD_BUY), 3600).await;
     // The test config allows 1 lot.
