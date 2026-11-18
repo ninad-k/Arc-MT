@@ -1,0 +1,315 @@
+//@version=6
+// Session Levels: Open, High, Low and volume-profile VAH / POC / VAL for the
+// Asia, London and New York sessions.
+//  - Each session's lines run from its start to the day's end (or the current candle today).
+//  - Each session's labels sit at that session's own end: H / VAH / POC above the
+//    line, VAL / L / Open below it, so the three sessions never pile up in one place.
+//  - Labels are filled chips in the session colour with white text.
+//  - A dot marks each session's open, and vertical lines mark its start and end,
+//    all in that session's colour.
+indicator("Session Levels (Open, H/L, VAH/POC/VAL)", shorttitle = "Session Levels", overlay = true,
+     max_lines_count = 500, max_labels_count = 500)
+
+// ---------------------------------------------------------------- Inputs
+grpS = "Sessions (local exchange hours)"
+asiaOn  = input.bool(true, "Asia", inline = "a", group = grpS)
+asiaSes = input.session("0900-1800", "", inline = "a", group = grpS)
+asiaTz  = input.string("Asia/Tokyo", "", inline = "a", group = grpS)
+asiaCol = input.color(#FF9800, "", inline = "a", group = grpS)
+asiaDot = input.color(#FFC107, "", inline = "a", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+lonOn   = input.bool(true, "London", inline = "l", group = grpS)
+lonSes  = input.session("0800-1700", "", inline = "l", group = grpS)
+lonTz   = input.string("Europe/London", "", inline = "l", group = grpS)
+lonCol  = input.color(#2196F3, "", inline = "l", group = grpS)
+lonDot  = input.color(#2196F3, "", inline = "l", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+nyOn    = input.bool(true, "New York", inline = "n", group = grpS)
+nySes   = input.session("0800-1700", "", inline = "n", group = grpS)
+nyTz    = input.string("America/New_York", "", inline = "n", group = grpS)
+nyCol   = input.color(#E91E63, "", inline = "n", group = grpS)
+nyDot   = input.color(#E91E63, "", inline = "n", group = grpS, tooltip = "Session colour, then the colour of its Open dot")
+
+grpP  = "Volume profile"
+vaPct = input.float(70, "Value area %", minval = 10, maxval = 100, group = grpP) / 100
+rowIn = input.float(0, "Row size (0 = auto)", minval = 0, group = grpP,
+     tooltip = "Price step for the profile. Auto picks a round step near 0.025% of price (about 1.0 on gold).")
+ltfIn = input.timeframe("1", "Detail timeframe", group = grpP,
+     tooltip = "Lower timeframe used to build the profile. Falls back to chart bars where no detail data exists.")
+
+grpD     = "Display"
+daysN    = input.int(2, "Days to show", minval = 1, maxval = 20, group = grpD)
+extendTo = input.string("Day end", "Extend lines to", options = ["Day end", "Session end"], group = grpD,
+     tooltip = "Day end: lines run until the last session of the day closes. Session end: lines stop when their own session closes.")
+showHL   = input.bool(true, "Session High / Low", group = grpD)
+showVA   = input.bool(true, "VAH / POC / VAL", group = grpD)
+showOpen = input.bool(true, "Session Open", group = grpD)
+showVert = input.bool(true, "Session start / end lines", group = grpD)
+vertTransp = input.int(50, "Start / end line transparency", minval = 0, maxval = 90, group = grpD)
+mergePct = input.float(0.03, "Merge labels within (% of price)", minval = 0, step = 0.01, group = grpD)
+lblSize  = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = grpD)
+vaTransp = input.int(35, "VAH / VAL line transparency", minval = 0, maxval = 90, group = grpD)
+
+// ---------------------------------------------------------------- Types
+type Sess
+    string       name
+    color        col
+    color        dot
+    bool         on
+    array<float> hs
+    array<float> ls
+    array<float> vs
+    bool         active = false
+    float        hi
+    float        lo
+
+type Lv
+    string       name
+    color        col
+    color        dot
+    int          t0
+    int          t1           // where this session's labels sit
+    float        o
+    float        hi
+    float        lo
+    float        vah
+    float        poc
+    float        val
+    array<line>  lines
+    array<line>  vls          // vertical start / end lines
+    array<label> tags
+
+type Day
+    array<Lv>    lvs
+    array<label> dots
+    bool         isOpen = true
+
+// ---------------------------------------------------------------- Data
+ltf = timeframe.in_seconds(ltfIn) < timeframe.in_seconds() ? ltfIn : timeframe.period
+[ltfH, ltfL, ltfV] = request.security_lower_tf(syminfo.tickerid, ltf, [high, low, volume])
+
+inAsia = not na(time(timeframe.period, asiaSes, asiaTz))
+inLon  = not na(time(timeframe.period, lonSes, lonTz))
+inNy   = not na(time(timeframe.period, nySes, nyTz))
+inArr  = array.from(inAsia, inLon, inNy)
+
+var array<Sess> S = array.from(
+     Sess.new("Asia",   asiaCol, asiaDot, asiaOn, array.new<float>(), array.new<float>(), array.new<float>()),
+     Sess.new("London", lonCol,  lonDot,  lonOn,  array.new<float>(), array.new<float>(), array.new<float>()),
+     Sess.new("NY",     nyCol,   nyDot,   nyOn,   array.new<float>(), array.new<float>(), array.new<float>()))
+var array<Day> days = array.new<Day>()
+
+// ---------------------------------------------------------------- Helpers
+rowSize() =>
+    float r = rowIn
+    if r <= 0
+        float raw  = close * 0.00025
+        float p10  = math.pow(10, math.floor(math.log10(raw)))
+        float m    = raw / p10
+        float nice = m < 1.5 ? 1.0 : m < 2.25 ? 2.0 : m < 3.5 ? 2.5 : m < 7.5 ? 5.0 : 10.0
+        r := nice * p10
+    math.max(r, syminfo.mintick)
+
+// Volume profile of one session -> [VAH, POC, VAL]
+profile(Sess s) =>
+    float row  = rowSize()
+    int   base = int(math.floor(s.lo / row))
+    int   n    = math.max(math.min(int(math.floor(s.hi / row)) - base + 1, 5000), 1)
+    vol = array.new<float>(n, 0.0)
+    int cnt = s.hs.size()
+    if cnt > 0
+        for i = 0 to cnt - 1
+            // Clamp both ends to the bin range: a live detail bar can sit outside the
+            // session range recorded so far, and a downward `for` would read past the array.
+            int   b0 = math.min(math.max(int(math.floor(s.ls.get(i) / row)) - base, 0), n - 1)
+            int   b1 = math.max(math.min(int(math.floor(s.hs.get(i) / row)) - base, n - 1), b0)
+            float v  = s.vs.get(i)
+            v := na(v) or v <= 0 ? 1.0 : v          // no volume data -> count time instead
+            float per = v / (b1 - b0 + 1)
+            for b = b0 to b1
+                vol.set(b, vol.get(b) + per)
+    int   p     = vol.indexof(vol.max())
+    float total = vol.sum()
+    int   a     = p
+    int   z     = p
+    float acc   = vol.get(p)
+    while acc < vaPct * total and (a > 0 or z < n - 1)
+        float up = z < n - 1 ? vol.get(z + 1) : -1.0
+        float dn = a > 0 ? vol.get(a - 1) : -1.0
+        if up >= dn
+            z += 1
+            acc += vol.get(z)
+        else
+            a -= 1
+            acc += vol.get(a)
+    [math.min((base + z + 1) * row, s.hi), (base + p + 0.5) * row, math.max((base + a) * row, s.lo)]
+
+findLv(Day d, string name) =>
+    Lv found = na
+    if not na(d)
+        for lv in d.lvs
+            if lv.name == name
+                found := lv
+    found
+
+// Lines in order: High, VAH, POC, VAL, Low, Open
+drawLv(Lv lv, int x2) =>
+    prices = array.from(lv.hi, lv.vah, lv.poc, lv.val, lv.lo, lv.o)
+    if lv.lines.size() == 0
+        for i = 0 to 5
+            bool   isVA  = i >= 1 and i <= 3
+            bool   isPoc = i == 2
+            bool   isO   = i == 5
+            bool   show  = isO ? showOpen : isVA ? showVA : showHL
+            color  base  = isO ? lv.dot : lv.col
+            color  c     = not show ? na : (isVA and not isPoc) ? color.new(base, vaTransp) : base
+            string st    = isO ? line.style_dotted : (isVA and not isPoc) ? line.style_dashed : line.style_solid
+            int    w     = isPoc ? 3 : isO or isVA ? 1 : 2
+            lv.lines.push(line.new(lv.t0, prices.get(i), x2, prices.get(i), xloc.bar_time, extend.none, c, st, w))
+    else
+        for i = 0 to 5
+            line ln = lv.lines.get(i)
+            ln.set_xy1(lv.t0, prices.get(i))
+            ln.set_xy2(x2, prices.get(i))
+
+// Emit one group of labels (merged when close together) above or below their lines
+// Live (still running) sessions sit just right of the current candle with the text
+// extending rightwards, so the chip never covers the candle at any zoom level.
+emitTags(Lv lv, array<float> prices, array<string> names, array<color> cols, bool above, bool live) =>
+    if prices.size() > 0
+        idx = prices.sort_indices(order.descending)
+        float  tol = close * mergePct / 100
+        float  gp  = na
+        color  gc  = na
+        string txt = ""
+        string sty = live ? label.style_label_left : above ? label.style_label_down : label.style_label_up
+        for k = 0 to idx.size() - 1
+            int    i    = idx.get(k)
+            float  p    = prices.get(i)
+            string item = names.get(i) + " " + str.tostring(p, format.mintick)
+            if na(gp) or gp - p > tol
+                if not na(gp)
+                    lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
+                gp  := p
+                gc  := cols.get(i)
+                txt := item
+            else
+                txt += "  |  " + item
+        lv.tags.push(label.new(lv.t1, gp, txt, xloc.bar_time, yloc.price, gc, sty, color.white, lblSize))
+
+buildTags(Lv lv, bool live) =>
+    for lb in lv.tags
+        lb.delete()
+    lv.tags.clear()
+    // Above the line: High, VAH, POC.  Below the line: VAL, Low, Open.
+    upP = array.new<float>(),  upN = array.new<string>(),  upC = array.new<color>()
+    dnP = array.new<float>(),  dnN = array.new<string>(),  dnC = array.new<color>()
+    if showHL
+        upP.push(lv.hi), upN.push(lv.name + " H"), upC.push(lv.col)
+        dnP.push(lv.lo), dnN.push(lv.name + " L"), dnC.push(lv.col)
+    if showVA
+        upP.push(lv.vah), upN.push(lv.name + " VAH"), upC.push(lv.col)
+        upP.push(lv.poc), upN.push(lv.name + " POC"), upC.push(lv.col)
+        dnP.push(lv.val), dnN.push(lv.name + " VAL"), dnC.push(lv.col)
+    if showOpen
+        dnP.push(lv.o), dnN.push(lv.name + " Open"), dnC.push(lv.dot)
+    emitTags(lv, upP, upN, upC, true, live)
+    emitTags(lv, dnP, dnN, dnC, false, live)
+
+// Vertical line across the pane at a session's start or end
+vline(Lv lv, int t) =>
+    if showVert
+        lv.vls.push(line.new(t, low, t, high, xloc.bar_time, extend.both, color.new(lv.col, vertTransp), line.style_dotted, 1))
+
+extendDay(Day d, int x2) =>
+    if extendTo == "Day end"
+        for lv in d.lvs
+            for ln in lv.lines
+                ln.set_x2(x2)
+
+newDay() =>
+    Day d = Day.new(array.new<Lv>(), array.new<label>())
+    days.push(d)
+    while days.size() > daysN
+        Day old = days.shift()
+        for lv in old.lvs
+            for ln in lv.lines
+                ln.delete()
+            for ln in lv.vls
+                ln.delete()
+            for lb in lv.tags
+                lb.delete()
+        for lb in old.dots
+            lb.delete()
+    d
+
+// ---------------------------------------------------------------- Main
+Day cur = days.size() > 0 ? days.last() : na
+
+for [i, s] in S
+    if not s.on
+        continue
+    bool inS = inArr.get(i)
+
+    // Session start: open a new day if this session already ran in the current one
+    if inS and not s.active
+        if na(cur) or not cur.isOpen or not na(findLv(cur, s.name))
+            if not na(cur) and cur.isOpen
+                cur.isOpen := false
+                extendDay(cur, time)
+            cur := newDay()
+        s.active := true
+        s.hi := high
+        s.lo := low
+        s.hs.clear(), s.ls.clear(), s.vs.clear()
+        Lv nlv = Lv.new(s.name, s.col, s.dot, time, time, open, high, low, na, na, na, array.new<line>(), array.new<line>(), array.new<label>())
+        cur.lvs.push(nlv)
+        vline(nlv, time)
+        if showOpen
+            cur.dots.push(label.new(time, open, "", xloc.bar_time, yloc.price, s.dot, label.style_circle, s.dot, size.tiny))
+
+    // Inside the session: collect detail bars
+    if inS
+        s.hi := math.max(s.hi, high)
+        s.lo := math.min(s.lo, low)
+        int m = ltfH.size()
+        if m > 0
+            for k = 0 to m - 1
+                s.hs.push(ltfH.get(k)), s.ls.push(ltfL.get(k)), s.vs.push(ltfV.get(k))
+        else
+            s.hs.push(high), s.ls.push(low), s.vs.push(volume)
+
+    // Session end (first bar after it): finalise its levels and labels
+    if not inS and s.active
+        s.active := false
+        Lv lv = findLv(cur, s.name)
+        if not na(lv)
+            [vah, poc, val] = profile(s)
+            lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
+            lv.t1 := time
+            drawLv(lv, time)
+            buildTags(lv, false)
+            vline(lv, time)
+
+// Keep the current day's lines reaching the latest bar; close the day once no session runs
+if not na(cur) and cur.isOpen
+    bool anyActive = false
+    for s in S
+        if s.on and s.active
+            anyActive := true
+    if anyActive
+        extendDay(cur, time)
+    else if cur.lvs.size() > 0
+        cur.isOpen := false
+        extendDay(cur, time)
+
+// Live: update running sessions, with their labels just right of the current candle
+if barstate.islast and not na(cur) and cur.isOpen
+    for s in S
+        if s.on and s.active
+            Lv lv = findLv(cur, s.name)
+            if not na(lv)
+                [vah, poc, val] = profile(s)
+                lv.hi := s.hi, lv.lo := s.lo, lv.vah := vah, lv.poc := poc, lv.val := val
+                lv.t1 := time + timeframe.in_seconds() * 1000
+                drawLv(lv, time)
+                buildTags(lv, true)
+    extendDay(cur, time)
