@@ -329,6 +329,10 @@ impl NewsProvider for AlphaVantage {
         "alphavantage"
     }
 
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base)
+    }
+
     async fn fetch(&self, q: &NewsQuery) -> Result<Vec<Headline>, NewsError> {
         Ok(self
             .fetch_articles(q)

@@ -13,6 +13,8 @@ pub fn config(kind: ProviderKind, base_url: &str, timeout_secs: u64) -> Provider
         api_key_env: None,
         timeout_secs,
         max_tokens: 777,
+        keep_alive: None,
+        refusal_fallback: false,
     }
 }
 
@@ -43,6 +45,8 @@ pub fn simple_request(text: &str) -> ChatRequest {
         tools: vec![get_price_tool()],
         max_tokens: None,
         temperature: None,
+        effort: None,
+        cache_system: false,
     }
 }
 
@@ -71,7 +75,17 @@ pub fn multi_turn_request() -> ChatRequest {
         tools: vec![get_price_tool()],
         max_tokens: None,
         temperature: Some(0.2),
+        effort: None,
+        cache_system: false,
     }
+}
+
+/// Bodies of every request the mock server received, in order.
+pub async fn all_bodies(server: &MockServer) -> Vec<Value> {
+    let reqs = server.received_requests().await.expect("recording enabled");
+    reqs.iter()
+        .map(|r| r.body_json().expect("request body is JSON"))
+        .collect()
 }
 
 /// Body of the first request the mock server received.

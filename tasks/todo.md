@@ -117,3 +117,7 @@ Plan and decisions: [plan-sprints-2-5.md](plan-sprints-2-5.md).
 - [ ] Stop and restart the EA mid-session against a real terminal and confirm the next call recovers (covered by mock tests).
 - [ ] Android and iOS builds (scaffolded; need the Android SDK or macOS).
 - [ ] First tagged release (`v0.2.0`) once the above are settled.
+
+# Fully local mode
+
+Spec: [spec-fully-local.md](spec-fully-local.md). Plan and task list: [plan-fully-local.md](plan-fully-local.md).

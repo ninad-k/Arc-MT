@@ -251,6 +251,8 @@ pub struct TestApp {
     pub clock: Option<ManualClock>,
     /// The folder for generated and user symbol maps (`Options::maps`).
     pub data_dir: Option<std::path::PathBuf>,
+    /// Where Assistant mode keeps its 3D models and spend total in this test.
+    pub assistant_dir: std::path::PathBuf,
 }
 
 pub struct Options<'a> {
@@ -287,6 +289,11 @@ pub struct Options<'a> {
     pub market: &'a str,
     /// Replaces the news service (default: none configured).
     pub news: Option<jarvis_news::NewsService>,
+    /// Notes folder for `[notes] dir`; `None` turns notes off, so the tool list stays as before.
+    pub notes: Option<std::path::PathBuf>,
+    /// Extra lines for the `[assistant]` table (its models and spend files always go to a
+    /// fresh temp folder, `TestApp::assistant_dir`).
+    pub assistant: &'a str,
 }
 
 impl Default for Options<'_> {
@@ -309,6 +316,8 @@ impl Default for Options<'_> {
             auto_detect: true,
             market: "",
             news: None,
+            notes: None,
+            assistant: "",
         }
     }
 }
@@ -399,6 +408,17 @@ auto_detect = {}
             opts.market
         ));
     }
+    match &opts.notes {
+        Some(dir) => toml.push_str(&format!("\n[notes]\ndir = '{}'\n", dir.display())),
+        None => toml.push_str("\n[notes]\nenabled = false\n"),
+    }
+    let assistant_dir = std::env::temp_dir().join(format!("jarvis-assistant-{}", Uuid::new_v4()));
+    toml.push_str(&format!(
+        "\n[assistant]\nmodels_dir = '{}'\nspend_file = '{}'\n{}\n",
+        assistant_dir.join("models3d").display(),
+        assistant_dir.join("spend.json").display(),
+        opts.assistant
+    ));
     let config = Config::from_toml_str(&toml).expect("test config");
     let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
@@ -452,6 +472,7 @@ auto_detect = {}
         llm,
         clock,
         data_dir,
+        assistant_dir,
     }
 }
 

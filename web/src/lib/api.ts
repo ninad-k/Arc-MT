@@ -51,6 +51,10 @@ export interface AuthStatus {
 export interface VoiceStatus {
 	stt: boolean;
 	tts: boolean;
+	/** Who speaks: Piper alone, or VoiceStudio with Piper as the fallback. */
+	tts_engine?: 'piper' | 'voicestudio';
+	/** The voice that spoke the latest line, e.g. `piper:en_GB-alan-medium`. */
+	last_voice?: string | null;
 }
 
 export type Weekday = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
@@ -246,12 +250,19 @@ export interface WatchlistResponse {
 
 // ---- Chat, previews, confirmation ----------------------------------------
 
+/** Which side of the app a chat turn is for (spec-assistant-mode). */
+export type ChatMode = 'trading' | 'assistant';
+
 export interface ChatRequest {
 	session_id?: string;
 	message: string;
 	provider?: string;
 	/** The turn came from the microphone: previews use `after_readback` timing. */
 	voice?: boolean;
+	/** Default `trading`. `assistant` is the Claude butler, with no MT5 tools at all. */
+	mode?: ChatMode;
+	/** Assistant mode: the model on the user's screen, so "make it red" changes that one. */
+	stage_model?: { id: string };
 }
 
 export interface ToolCall {
@@ -307,6 +318,122 @@ export interface ChatResponse {
 	preview?: PreviewDto | null;
 	/** Persona that answered (id). Absent on a server without personas. */
 	persona?: string;
+	/** The user's notes the reply drew on (ADR-0021). Absent on older servers. */
+	notes?: CitedNote[];
+	/** Absent on older servers (always trading there). */
+	mode?: ChatMode;
+	/** The model that answered. */
+	brain?: { provider: string; model: string | null };
+	/** 3D models built in this turn (Assistant mode). */
+	models?: ModelRef[];
+	/** Notes written by "remember that ..." in this turn (Assistant mode). */
+	captured?: CapturedNote[];
+	/** This month's Claude spending (Assistant mode). */
+	spend?: SpendStatus | null;
+}
+
+/** A 3D model built by the assistant. */
+export interface ModelRef {
+	id: string;
+	title: string;
+}
+
+/** What a model is made of: Claude's code, an uploaded 3D file, or a picture as a relief. */
+export type ModelKind = 'code' | 'file' | 'relief';
+
+/** A saved 3D model. Its code, file or picture is only ever run or opened inside the sandbox. */
+export interface Model3d extends ModelRef {
+	description: string;
+	code: string;
+	created_at: string;
+	previous_id?: string | null;
+	/** Absent on older servers (always code there). */
+	kind?: ModelKind;
+	/** For a file or relief: glb, gltf, obj, stl, ply, png, jpeg or webp. */
+	format?: string | null;
+	info?: { parts: string[]; size: [number, number, number] } | null;
+	/** For a file or relief: Claude's change to it. */
+	overlay?: string | null;
+}
+
+export interface ModelSummary extends ModelRef {
+	description: string;
+	created_at: string;
+	kind?: ModelKind;
+}
+
+/** The answer to an upload of a 3D file or a picture for a relief. */
+export interface UploadedModel extends ModelRef {
+	kind: ModelKind;
+	format: string;
+}
+
+/** The answer to "build a 3D model of this picture": `model` is null when nothing was built. */
+export interface ImageBuild {
+	model: ModelRef | null;
+	message: string;
+	spend: SpendStatus | null;
+}
+
+export interface CapturedNote {
+	id: number;
+	title: string;
+	path: string;
+}
+
+export interface SpendStatus {
+	month: string;
+	spent_usd: number;
+	budget_usd: number;
+	/** At or over 80% of the monthly cap. */
+	warn: boolean;
+	/** At or over the cap: Assistant mode sends nothing more this month. */
+	blocked: boolean;
+}
+
+export interface AssistantStatus {
+	enabled: boolean;
+	/** The provider is usable (for Claude: the API key is set). */
+	available: boolean;
+	reason: string | null;
+	brain: { provider: string; model: string | null } | null;
+	spend: SpendStatus | null;
+	notes?: boolean;
+}
+
+/** A note a reply drew on. */
+export interface CitedNote {
+	id: number;
+	title: string;
+}
+
+/** One note in the galaxy. */
+export interface NoteNode {
+	id: number;
+	title: string;
+	group: string;
+	path: string;
+	excerpt: string;
+	degree: number;
+}
+
+export interface NotesGraph {
+	/** The configured notes folder. */
+	dir: string;
+	nodes: NoteNode[];
+	links: { source: number; target: number }[];
+	/** Files left out (too large, unreadable, over the limit). */
+	skipped: number;
+	/** Set when the folder cannot be read (missing, not a folder). */
+	error: string | null;
+}
+
+export interface NoteText {
+	id: number;
+	title: string;
+	group: string;
+	path: string;
+	text: string;
 }
 
 export interface TradeResult {
@@ -810,6 +937,9 @@ const post = <T>(path: string, body?: unknown, extra: RequestOptions = {}) =>
 	request<T>(path, { method: 'POST', body, ...extra });
 const put = <T>(path: string, body?: unknown, extra: RequestOptions = {}) =>
 	request<T>(path, { method: 'PUT', body, ...extra });
+/** A raw upload (a 3D file or a picture), sent with its own content type. */
+const postBytes = <T>(path: string, blob: Blob, timeoutMs: number) =>
+	request<T>(path, { method: 'POST', blob, timeoutMs });
 
 // ---- Endpoints -----------------------------------------------------------
 
@@ -825,7 +955,8 @@ export const api = {
 	watchlist: (signal?: AbortSignal) => request<WatchlistResponse>('/api/watchlist', { signal }),
 	/** LLM turns can be slow on local models, so allow a generous timeout. */
 	chat: (body: ChatRequest, signal?: AbortSignal) =>
-		post<ChatResponse>('/api/chat', body, { signal, timeoutMs: 180_000 }),
+		// Assistant turns that build a 3D model can take up to the server's 300 s limit.
+		post<ChatResponse>('/api/chat', body, { signal, timeoutMs: body.mode === 'assistant' ? 320_000 : 180_000 }),
 
 	confirm: (token: string) =>
 		post<ConfirmResponse>(`/api/confirm/${encodeURIComponent(token)}`, undefined, {
@@ -847,6 +978,26 @@ export const api = {
 	login: (body: LoginRequest) => post<Session>('/api/auth/login', body, { keepOn401: true }),
 	logout: () => post<void>('/api/auth/logout', undefined, { keepOn401: true }),
 	me: (signal?: AbortSignal) => request<Session>('/api/auth/me', { signal, keepOn401: true }),
+
+	notesGraph: (signal?: AbortSignal) => request<NotesGraph>('/api/notes/graph', { signal }),
+	captureNote: (text: string) => post<CapturedNote>('/api/notes/capture', { text }),
+	assistantStatus: (signal?: AbortSignal) => request<AssistantStatus>('/api/assistant/status', { signal }),
+	models: (signal?: AbortSignal) => request<{ models: ModelSummary[] }>('/api/models', { signal }),
+	model: (id: string, signal?: AbortSignal) => request<Model3d>(`/api/models/${encodeURIComponent(id)}`, { signal }),
+	/** The stored bytes of an uploaded file or relief picture. */
+	modelFile: async (id: string, signal?: AbortSignal): Promise<ArrayBuffer> =>
+		(await request<Blob>(`/api/models/${encodeURIComponent(id)}/file`, { signal, asBlob: true, timeoutMs: 60_000 })).arrayBuffer(),
+	putModelInfo: (id: string, info: { parts: string[]; size: [number, number, number] }) =>
+		put<{ ok: boolean }>(`/api/models/${encodeURIComponent(id)}/info`, info),
+	uploadModel: (file: Blob, name: string) =>
+		postBytes<UploadedModel>(`/api/models/upload?name=${encodeURIComponent(name)}`, file, 60_000),
+	uploadRelief: (image: Blob, name: string) =>
+		postBytes<UploadedModel>(`/api/models/relief?name=${encodeURIComponent(name)}`, image, 60_000),
+	/** Claude builds a model of what the picture shows (paid). Waits as long as a chat turn. */
+	modelFromImage: (image: Blob, note: string) =>
+		postBytes<ImageBuild>(`/api/models/from-image?note=${encodeURIComponent(note.slice(0, 1000))}`, image, 320_000),
+	rescanNotes: () => post<NotesGraph>('/api/notes/rescan'),
+	note: (id: number, signal?: AbortSignal) => request<NoteText>(`/api/notes/${id}`, { signal }),
 
 	audit: (opts: { limit?: number; beforeId?: number | null } = {}, signal?: AbortSignal) => {
 		const q = new URLSearchParams({ limit: String(opts.limit ?? 50) });

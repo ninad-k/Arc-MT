@@ -48,7 +48,7 @@ async fn request_shape_multi_turn() {
     let body = first_body(&server).await;
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["max_tokens"], 777);
-    assert_eq!(body["system"], "You are Jarvis.");
+    assert_eq!(body["system"], "You are Jarvis.", "not cached unless asked");
     // Current models reject sampling params: temperature must not be sent.
     assert!(body.get("temperature").is_none());
     assert!(body.get("tool_choice").is_none());
@@ -105,6 +105,8 @@ async fn request_max_tokens_override_and_no_system_no_tools() {
         tools: vec![],
         max_tokens: Some(50),
         temperature: None,
+        effort: None,
+        cache_system: false,
     };
     provider(&server, 5).chat(&req).await.unwrap();
     let body = first_body(&server).await;
@@ -145,6 +147,8 @@ async fn parallel_tool_results_share_one_user_message_and_error_flag() {
         tools: vec![get_price_tool()],
         max_tokens: None,
         temperature: None,
+        effort: None,
+        cache_system: false,
     };
     provider(&server, 5).chat(&req).await.unwrap();
     let body = first_body(&server).await;
@@ -178,7 +182,8 @@ async fn parses_text_only() {
         r.usage,
         Some(Usage {
             input_tokens: 10,
-            output_tokens: 4
+            output_tokens: 4,
+            ..Usage::default()
         })
     );
 }
@@ -209,7 +214,9 @@ async fn parses_tool_calls_with_text() {
         r.usage,
         Some(Usage {
             input_tokens: 105,
-            output_tokens: 9
+            output_tokens: 9,
+            cache_read_tokens: 100,
+            cache_write_tokens: 0,
         })
     );
 }
@@ -235,7 +242,7 @@ async fn parses_max_tokens_and_other_stop_reasons() {
         .chat(&simple_request("hi"))
         .await
         .unwrap();
-    assert_eq!(r.stop_reason, StopReason::Other("refusal".into()));
+    assert_eq!(r.stop_reason, StopReason::Refusal);
     assert_eq!(r.text, None);
 }
 
@@ -486,4 +493,151 @@ fn a_key_is_never_sent_over_plain_http_to_a_remote_host() {
             "{url}"
         );
     }
+}
+
+// --- Assistant mode (spec-assistant-mode): caching, effort, refusals, usage, fallback ---
+
+#[tokio::test]
+async fn marks_the_system_prompt_and_the_last_tool_for_prompt_caching() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+    })))
+    .await;
+    let mut req = simple_request("hi");
+    req.cache_system = true;
+    req.tools.push(jarvis_llm::ToolSpec {
+        name: "second".into(),
+        description: "d".into(),
+        parameters: json!({"type": "object", "properties": {}}),
+    });
+    provider(&server, 5).chat(&req).await.unwrap();
+    let body = first_body(&server).await;
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "You are Jarvis.", "cache_control": {"type": "ephemeral"}}])
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert!(tools[0].get("cache_control").is_none());
+    assert_eq!(tools[1]["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn effort_comes_from_the_request_then_the_provider() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+    })))
+    .await;
+    let p = provider(&server, 5).with_effort("medium");
+    let mut req = simple_request("hi");
+    req.effort = Some("high".into());
+    p.chat(&req).await.unwrap();
+    p.chat(&simple_request("hi")).await.unwrap();
+    let bodies = all_bodies(&server).await;
+    assert_eq!(bodies[0]["output_config"], json!({"effort": "high"}));
+    assert_eq!(bodies[1]["output_config"], json!({"effort": "medium"}));
+
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+    })))
+    .await;
+    provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert!(first_body(&server).await.get("output_config").is_none());
+}
+
+#[tokio::test]
+async fn a_refusal_is_its_own_stop_reason() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [], "stop_reason": "refusal",
+        "stop_details": {"type": "refusal", "category": "cyber", "explanation": "x"}
+    })))
+    .await;
+    let r = provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(r.stop_reason, StopReason::Refusal);
+    assert_eq!(r.text, None);
+}
+
+#[tokio::test]
+async fn usage_reports_cache_reads_and_writes_separately() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+        "usage": {"input_tokens": 20, "cache_creation_input_tokens": 300,
+                  "cache_read_input_tokens": 1000, "output_tokens": 50}
+    })))
+    .await;
+    let r = provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.usage,
+        Some(Usage {
+            input_tokens: 1320,
+            output_tokens: 50,
+            cache_read_tokens: 1000,
+            cache_write_tokens: 300,
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_refusal_fallback_is_sent_only_when_configured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("anthropic-beta", "server-side-fallback-2026-07-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(ProviderKind::Anthropic, &server.uri(), 5);
+    cfg.refusal_fallback = true;
+    let p = AnthropicProvider::new(&cfg, "sk-ant-test-key").unwrap();
+    p.chat(&simple_request("hi")).await.unwrap();
+    assert_eq!(first_body(&server).await["fallbacks"], "default");
+
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+    })))
+    .await;
+    provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    let req = &server.received_requests().await.unwrap()[0];
+    assert!(req.headers.get("anthropic-beta").is_none());
+    assert!(first_body(&server).await.get("fallbacks").is_none());
+}
+
+#[tokio::test]
+async fn an_image_message_sends_an_image_block_before_its_text() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"
+    })))
+    .await;
+    let req = ChatRequest {
+        system: None,
+        messages: vec![Message::UserImage {
+            text: "build this".into(),
+            media_type: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }],
+        ..ChatRequest::default()
+    };
+    provider(&server, 5).chat(&req).await.unwrap();
+    let body = first_body(&server).await;
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+            {"type": "text", "text": "build this"}
+        ])
+    );
 }

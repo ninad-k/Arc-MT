@@ -58,6 +58,8 @@ async fn gold_price_flow(p: &dyn LlmProvider) {
         tools: vec![tool()],
         max_tokens: Some(512),
         temperature: None,
+        effort: None,
+        cache_system: false,
     };
 
     let t0 = Instant::now();
@@ -134,6 +136,8 @@ async fn ollama_gold_price_tool_roundtrip() {
         api_key_env: None,
         timeout_secs: 180,
         max_tokens: 512,
+        keep_alive: None,
+        refusal_fallback: false,
     };
     let p = build_provider(&cfg).unwrap();
     gold_price_flow(p.as_ref()).await;
@@ -154,6 +158,8 @@ async fn anthropic_gold_price_tool_roundtrip() {
         api_key_env: Some("ANTHROPIC_API_KEY".into()),
         timeout_secs: 60,
         max_tokens: 1024,
+        keep_alive: None,
+        refusal_fallback: false,
     };
     // The environment may point ANTHROPIC_BASE_URL at a proxy; honour it only if set explicitly.
     let cfg = ProviderConfig {
@@ -183,6 +189,8 @@ async fn openai_gold_price_tool_roundtrip() {
         api_key_env: Some("OPENAI_API_KEY".into()),
         timeout_secs: 90,
         max_tokens: 2048,
+        keep_alive: None,
+        refusal_fallback: false,
     };
     let p = build_provider(&cfg).unwrap();
     gold_price_flow(p.as_ref()).await;

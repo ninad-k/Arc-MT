@@ -186,7 +186,7 @@ pub fn collect_sources(history: &[Message], skip: &[usize], time_text: &str) -> 
             continue;
         }
         match message {
-            Message::User { text } => sources.add_text(text),
+            Message::User { text } | Message::UserImage { text, .. } => sources.add_text(text),
             Message::ToolResult { content, .. } => sources.add_tool_result(content),
             Message::Assistant { .. } => {}
         }

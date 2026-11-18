@@ -148,7 +148,8 @@ async fn both_routes_say_503_when_voice_is_off() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"]["code"], "voice_unavailable");
     let (_, status_body) = request(&app.router, "GET", "/api/status", None).await;
-    assert_eq!(status_body["voice"], json!({ "stt": false, "tts": false }));
+    assert_eq!(status_body["voice"]["stt"], false);
+    assert_eq!(status_body["voice"]["tts"], false);
 }
 
 #[tokio::test]
@@ -156,7 +157,9 @@ async fn a_half_configured_voice_reports_each_engine() {
     let stt = FakeStt::new("hello", 0);
     let (app, _mock) = voice_app(Some(Voice::new(Some(stt), None, 30.0)), false).await;
     let (_, status_body) = request(&app.router, "GET", "/api/status", None).await;
-    assert_eq!(status_body["voice"], json!({ "stt": true, "tts": false }));
+    assert_eq!(status_body["voice"]["stt"], true);
+    assert_eq!(status_body["voice"]["tts"], false);
+    assert_eq!(status_body["voice"]["tts_engine"], "piper");
     let (status, _) = request(
         &app.router,
         "POST",
@@ -320,4 +323,146 @@ async fn voice_routes_need_a_session_when_login_is_on() {
     let cookie = login(&app, &user).await;
     let (status, body) = transcribe(&app, "audio/wav", wav(0.1), Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Counts how often it is asked to speak.
+struct CountingTts(AtomicUsize);
+
+#[async_trait]
+impl TextToSpeech for CountingTts {
+    async fn synthesize(&self, text: &str) -> Result<Vec<u8>, VoiceError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        FakeTts.synthesize(text).await
+    }
+    fn voice_id(&self) -> String {
+        "fake:counting".to_owned()
+    }
+}
+
+#[tokio::test]
+async fn repeated_lines_are_served_from_the_memory_cache() {
+    let tts = Arc::new(CountingTts(Default::default()));
+    let voice = Voice::new(None, Some(tts.clone()), 30.0);
+    let (app, _mock) = voice_app(Some(voice), false).await;
+    let speak = |text: &'static str| {
+        let router = app.router.clone();
+        async move {
+            raw_request(
+                &router,
+                "POST",
+                "/api/voice/speak",
+                &[],
+                Some(json!({ "text": text }).to_string()),
+            )
+            .await
+        }
+    };
+    let (status, first_headers, first) = speak("Good afternoon, sir.").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_headers.get("x-jarvis-cache").unwrap(), "miss");
+    assert_eq!(
+        first_headers.get("x-jarvis-voice").unwrap(),
+        "fake:counting"
+    );
+
+    let (_, again_headers, again) = speak("Good afternoon, sir.").await;
+    assert_eq!(again_headers.get("x-jarvis-cache").unwrap(), "hit");
+    assert_eq!(again, first);
+    assert_eq!(tts.0.load(Ordering::SeqCst), 1, "the engine ran once");
+
+    let (_, other_headers, _) = speak("Something else.").await;
+    assert_eq!(other_headers.get("x-jarvis-cache").unwrap(), "miss");
+    assert_eq!(tts.0.load(Ordering::SeqCst), 2);
+}
+
+/// VoiceStudio that connects (health, engine, profiles) but whose speech endpoint fails.
+async fn failing_studio() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    for (verb, at) in [("GET", "/health"), ("POST", "/engines/select")] {
+        Mock::given(method(verb))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/profiles"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!([{"id": "p1", "name": "Jarvis"}, {"id": "p2", "name": "Friday"}]),
+            ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn when_voicestudio_fails_piper_speaks_and_the_status_says_so() {
+    let studio = failing_studio().await;
+    let cfg = jarvis_voice::VoiceStudioConfig {
+        url: studio.uri(),
+        ..Default::default()
+    };
+    let tts = Arc::new(CountingTts(Default::default()));
+    let voice =
+        Voice::new(None, Some(tts.clone()), 30.0).with_voicestudio(&cfg, real_personas().list());
+    assert_eq!(voice.status()["tts_engine"], "voicestudio");
+    let (app, _mock) = voice_app(Some(voice), false).await;
+
+    for _ in 0..2 {
+        let (status, headers, bytes) = raw_request(
+            &app.router,
+            "POST",
+            "/api/voice/speak",
+            &[],
+            Some(json!({ "text": "Good afternoon." }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(bytes.starts_with(b"RIFF"));
+        assert_eq!(headers.get("x-jarvis-voice").unwrap(), "fake:counting");
+        // The fallback's audio is not cached as if VoiceStudio had spoken it.
+        assert_eq!(headers.get("x-jarvis-cache").unwrap(), "miss");
+    }
+    assert_eq!(tts.0.load(Ordering::SeqCst), 2);
+    let (_, status) = request(&app.router, "GET", "/api/status", None).await;
+    assert_eq!(status["voice"]["last_voice"], "fake:counting", "{status}");
+}
+
+#[tokio::test]
+async fn when_voicestudio_is_down_at_start_piper_speaks_and_start_up_does_not_wait() {
+    let cfg = jarvis_voice::VoiceStudioConfig {
+        url: "http://127.0.0.1:1".into(),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let tts = Arc::new(CountingTts(Default::default()));
+    let voice =
+        Voice::new(None, Some(tts.clone()), 30.0).with_voicestudio(&cfg, real_personas().list());
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "no wait at start-up"
+    );
+    assert_eq!(voice.status()["tts_engine"], "voicestudio");
+    let (app, _mock) = voice_app(Some(voice), false).await;
+    let (status, headers, _) = raw_request(
+        &app.router,
+        "POST",
+        "/api/voice/speak",
+        &[],
+        Some(json!({ "text": "Hello." }).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-jarvis-voice").unwrap(), "fake:counting");
+    let (_, body) = request(&app.router, "GET", "/api/status", None).await;
+    assert_eq!(body["voice"]["voicestudio_connected"], false, "{body}");
 }

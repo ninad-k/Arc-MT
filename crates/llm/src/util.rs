@@ -95,10 +95,19 @@ pub(crate) fn build_client(
     headers: HeaderMap,
 ) -> Result<reqwest::Client, LlmError> {
     let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder();
+    if base_is_loopback(&crate::effective_base_url(cfg)) {
+        // A model on this machine is reached directly, never through a system proxy, so the
+        // outbound-connection log's "this machine" is true.
+        builder = builder.no_proxy();
+    }
+    builder
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(10)))
         .default_headers(headers)
+        // The outbound-connection log records the configured host; a redirect would reach
+        // another one without it being seen.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("jarvis-llm/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| {
@@ -107,6 +116,22 @@ pub(crate) fn build_client(
                 cfg.name
             ))
         })
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1`.
+pub(crate) fn base_is_loopback(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = u
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub(crate) fn map_reqwest(e: reqwest::Error) -> LlmError {

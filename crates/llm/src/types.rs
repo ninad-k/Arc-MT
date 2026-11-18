@@ -28,6 +28,15 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// Ollama only: how long the model stays loaded after a request, as an Ollama duration
+    /// (`"30m"`, `"2h"`, `"-1"` for always). Default `"30m"`, so the next question does not
+    /// pay for loading the model again. Ignored by the other providers.
+    #[serde(default)]
+    pub keep_alive: Option<String>,
+    /// Anthropic only: when Claude declines a request, re-run it on another Claude model
+    /// (`fallbacks: "default"`, billed at that model's rate). Default off.
+    #[serde(default)]
+    pub refusal_fallback: bool,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -62,6 +71,14 @@ pub enum Message {
     User {
         text: String,
     },
+    /// A user message with one image (Anthropic sends both; other providers send the text only,
+    /// with a note that an image could not be shown).
+    UserImage {
+        text: String,
+        /// `image/png`, `image/jpeg`, `image/webp` or `image/gif`.
+        media_type: String,
+        data_base64: String,
+    },
     Assistant {
         #[serde(default)]
         text: Option<String>,
@@ -78,7 +95,7 @@ pub enum Message {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub system: Option<String>,
     pub messages: Vec<Message>,
@@ -86,6 +103,14 @@ pub struct ChatRequest {
     /// Overrides `ProviderConfig::max_tokens` when set.
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// How hard the model should think (`low`..`max`). Anthropic only; others ignore it.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Mark the system prompt for prompt caching (Anthropic only). Set it only when the system
+    /// prompt is the same on every request: a prompt that changes (a clock) would pay the cache
+    /// write price every time and never be read back.
+    #[serde(default)]
+    pub cache_system: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,13 +119,22 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+    /// The model declined the request (Anthropic safety classifiers).
+    Refusal,
     Other(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// All prompt tokens, including those read from or written to the prompt cache.
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Of `input_tokens`, read from the prompt cache (billed at the cache-read price).
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    /// Of `input_tokens`, written to the prompt cache (billed at the cache-write price).
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 import { api } from '#lib/api.ts';
 import { describeError, toApiError } from '#lib/errors.ts';
 import { playBlob, primeAudio, type Playback } from '#lib/voice/audio.ts';
-import { clipForSpeech } from '#lib/voice/text.ts';
+import { chunkForSpeech, playInSequence } from '#lib/voice/sequence.ts';
 import { backend } from './hud.svelte';
 import { orb } from './orb.svelte';
 import { settings } from './settings.svelte';
@@ -63,21 +63,30 @@ class SpeechStore {
 	 * always continue (for example to start a confirmation window).
 	 */
 	async speak(text: string, persona?: string, force = false): Promise<boolean> {
-		const clip = clipForSpeech(text);
+		const chunks = chunkForSpeech(text);
 		// `force`: the caller already knows speech works (the settings page reads /api/status itself).
-		if ((!this.available && !force) || clip.length === 0) return false;
+		if ((!this.available && !force) || chunks.length === 0) return false;
 		this.stop();
 		const ctrl = new AbortController();
 		this.ctrl = ctrl;
 		try {
-			const blob = await api.speak(clip, ctrl.signal, persona);
-			if (ctrl.signal.aborted) return false;
-			this.speaking = true;
-			orb.speakLive();
-			const playback = await playBlob(blob, (v) => orb.setLevel(Math.min(1, v * 4)));
-			this.playback = playback;
-			await playback.done;
-			return true;
+			// Whole sentences, the next one fetched while this one plays; resolves after the last, so
+			// a confirmation window still starts when reading has finished (ADR-0007).
+			const finished = await playInSequence(
+				chunks,
+				(chunk, signal) => api.speak(chunk, signal, persona),
+				async (blob) => {
+					this.speaking = true;
+					orb.speakLive();
+					const playback = await playBlob(blob, (v) => orb.setLevel(Math.min(1, v * 4)));
+					// A newer speak() or stop() may have taken over while this chunk was decoding;
+					// then playInSequence stops it, and it must not replace the current playback.
+					if (this.ctrl === ctrl) this.playback = playback;
+					return playback;
+				},
+				ctrl.signal
+			);
+			return finished;
 		} catch (e) {
 			const err = toApiError(e);
 			if (err.code !== 'aborted') toasts.error(`Could not read the reply aloud. ${describeError(err)}`);

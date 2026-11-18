@@ -591,6 +591,7 @@ const PROTECTED: &[(&str, &str)] = &[
     ("GET", "/api/killswitch"),
     ("POST", "/api/killswitch"),
     ("GET", "/api/audit"),
+    ("GET", "/api/egress"),
     ("POST", "/api/auth/logout"),
     ("GET", "/api/auth/me"),
     ("GET", "/api/ws"),

@@ -10,6 +10,7 @@
 		const out: MenuItem[] = [];
 		if (auth.username) out.push({ id: 'user', label: `Signed in as ${auth.username}`, disabled: true });
 		out.push({ id: 'settings', label: 'Settings', divider: out.length > 0 });
+		out.push({ id: 'galaxy', label: 'Notes galaxy' });
 		out.push({ id: 'audit', label: 'Audit log' });
 		if (backend.ttsAvailable)
 			out.push({ id: 'aloud', label: 'Read replies aloud', checked: speech.readAloud });
@@ -22,6 +23,7 @@
 
 	function onselect(id: string) {
 		if (id === 'settings') void goto('/settings');
+		else if (id === 'galaxy') void goto('/galaxy');
 		else if (id === 'audit') void goto('/audit');
 		else if (id === 'aloud') speech.setReadAloud(!speech.readAloud);
 		else if (id === 'install') void pwa.install();

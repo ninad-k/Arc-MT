@@ -63,8 +63,12 @@ jobs:
       # declares an optional MySQL driver. `cargo tree -i rsa --target all -e all` shows
       # that rsa is not compiled into any Jarvis MT binary and no fix exists upstream.
       # Remove the ignore when sqlx drops it from the lockfile.
+      # RUSTSEC-2026-0459 (SQLite before 3.54.0, crafted -wal file) comes from the SQLite that
+      # sqlx bundles. The fix needs libsqlite3-sys >= 0.39, which no sqlx release accepts yet.
+      # Arc MT opens only the database it creates in its own data folder, so an attacker needs
+      # write access there first. Same ignore and reason in deny.toml. Review by 2027-01-31.
       - name: Audit the workspace lockfile
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
 
       - name: Audit the desktop lockfile
         if: hashFiles('apps/desktop/src-tauri/Cargo.lock') != ''

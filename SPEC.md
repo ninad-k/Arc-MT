@@ -97,7 +97,12 @@ Commands: `ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `ge
 
 ## LLM tools
 
-Read: `get_price(symbol)`, `get_account()`, `get_positions(filter)`, `get_orders(filter)`, `get_history(range)`.
+Two modes (ADR-0022). **Trading** has the tools below. **Assistant** (`POST /api/chat {"mode": "assistant"}`) is a
+separate loop on Claude with only `search_notes`, `remember_note`, `build_3d_model` and `list_3d_models`. It cannot
+read or propose trades, so the core rules above hold by construction there.
+
+Read: `get_price(symbol)`, `get_account()`, `get_positions(filter)`, `get_orders(filter)`, `get_history(range)`,
+`search_notes(query)` (the user's own markdown notes, when `[notes]` is on; ADR-0021).
 Propose (Sprint 2): `propose_order(symbol, side, volume, type, price?, sl?, tp?)`, `propose_modify(ticket, sl?, tp?)`,
 `propose_close(selector)`, `propose_cancel(selector)`.
 Symbol aliases come from config (`gold → XAUUSD`, `nasdaq → US100`, `dow → US30`). The STT prompt carries trading
@@ -113,6 +118,7 @@ Lint:         cargo clippy --workspace --all-targets -- -D warnings
 Format:       cargo fmt --all
 Run API:      cargo run -p jarvis-api
 Bridge ping:  cargo run -p jarvis-bridge-client --example bridge_cli -- ping
+Preflight:    cargo run -p jarvis-api -- preflight       (live checks + latency budget; docs/local-mode.md)
 EA compile:   pwsh scripts/compile-ea.ps1              (MetaEditor64 /compile, fails on errors)
 EA install:   pwsh scripts/install-ea.ps1 -Terminal <data-folder-id>
 Web dev:      pnpm -C web dev

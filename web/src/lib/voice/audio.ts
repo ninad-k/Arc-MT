@@ -3,6 +3,7 @@
  * playback with an AnalyserNode so the orb can follow the real signal.
  * Everything here needs a browser; the maths it feeds lives in ./wav.ts and is unit tested.
  */
+import { isMuted } from './sequence';
 import { MAX_SECONDS, chunksToWav16k, rms } from './wav';
 
 // ---- Shared context -------------------------------------------------------
@@ -208,8 +209,12 @@ export interface Playback {
 	stop(): void;
 }
 
-/** Decode and play a WAV blob, reporting the live output level (RMS 0..1) every frame. */
+/**
+ * Decode and play a WAV blob, reporting the live output level (RMS 0..1) every frame. The one
+ * place speech is played: a `?mute=1` tab returns at once without a sound.
+ */
 export async function playBlob(blob: Blob, onLevel: (rms: number) => void): Promise<Playback> {
+	if (isMuted()) return { done: Promise.resolve(), stop: () => {} };
 	const ctx = primeAudio();
 	if (!ctx) throw Object.assign(new Error('no AudioContext'), { name: 'Unsupported' });
 	if (ctx.state === 'suspended') await ctx.resume();

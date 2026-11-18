@@ -147,7 +147,8 @@ async fn parses_text_only() {
         r.usage,
         Some(Usage {
             input_tokens: 11,
-            output_tokens: 3
+            output_tokens: 3,
+            ..Usage::default()
         })
     );
 }

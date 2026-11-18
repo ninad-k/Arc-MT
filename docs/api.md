@@ -369,11 +369,86 @@ every persona and provider.
   transcription runs at a time; a request that waits more than 5 s for its turn gets
   `429 rate_limited`.
 - `POST /api/voice/speak` `{"text"}` (1–600 characters) → `200 audio/wav` (`400` for empty or longer text).
+  Headers: `X-Jarvis-Voice` names the voice that spoke (`piper:en_GB-alan-medium`,
+  `voicestudio:Jarvis`), and `X-Jarvis-Cache` is `hit` when the line came from the in-memory cache of
+  the last 64 lines (never stored on disk) or `miss`. The web app splits long replies into whole
+  sentences of about 170 characters and requests the next one while the current one plays.
 - Both answer `503 voice_unavailable` when `[voice]` is off or that engine did not load. Engines
   are loaded at startup; a missing model or a binary built without the `whisper` cargo feature
   logs a warning and switches only that half off. `GET /api/status` shows `voice.stt` / `voice.tts`.
   Speech-to-text needs `cargo build -p jarvis-api --features whisper` (CMake and LLVM); the default
   build has text-to-speech only.
+
+## Notes (ADR-0021)
+
+Same login rules as the other routes. `404 not_found` when `[notes] enabled = false`.
+
+- Note ids are a hash of the note's path (at most 2^52, exact in JavaScript), so they stay the same when
+  other notes are added or removed.
+- `GET /api/notes/graph` → `{"dir", "nodes": [{"id", "title", "group", "path", "excerpt", "degree"}],
+  "links": [{"source", "target"}], "skipped", "error"}`. `error` is set (and `nodes` empty) when the folder is
+  missing; that is still `200`.
+- `POST /api/notes/rescan` → the same, rebuilt now.
+- `GET /api/notes/{id}` → `{"id", "title", "group", "path", "text"}`; `404` for an unknown id.
+- `POST /api/chat` responses carry `"notes": [{"id", "title"}]`: the notes the reply drew on (empty when none).
+
+## Assistant mode (ADR-0022)
+
+Same login rules as the other routes.
+
+- `POST /api/chat` takes `"mode": "trading"` (default) or `"assistant"`; anything else is `400`.
+  - Responses now also carry:
+    - `"mode"`;
+    - `"brain": {"provider", "model"}`;
+    - `"models": [{"id", "title"}]`, the 3D models built in this turn;
+    - `"captured": [{"id", "title", "path"}]`, the notes written by "remember that ...";
+    - `"spend"`: `null` in Trading mode, else `{"month", "spent_usd", "budget_usd", "warn", "blocked"}`.
+  - An assistant turn never returns a `preview`.
+  - Without a usable provider, the reply explains how to set it up and nothing is sent.
+  - At the monthly cap, the reply says so and nothing is sent.
+- `GET /api/assistant/status` → `{"enabled", "available", "reason", "brain", "spend", "notes"}`.
+- `GET /api/models` → `{"models": [{"id", "title", "description", "created_at"}]}`, newest first.
+- `GET /api/models/{id}` → `{"id", "title", "description", "code", "created_at", "previous_id"}`.
+  - `id` is 12 lowercase hex characters, else `404`.
+  - `code` is a JavaScript function body. The web app runs it only in `/sandbox/model.html`.
+- `POST /api/notes/capture` `{"text"}` → `{"id", "title", "path"}`, a new note in the captures folder.
+  `400` for empty or over-long text; `404` when notes are off.
+- Uploads (tasks/spec-model-uploads.md), raw bodies:
+  - `POST /api/models/upload?name=car.glb` (25 MB) → `{"id", "title", "kind": "file", "format"}`.
+  - `POST /api/models/relief?name=photo.jpg` (5 MB) → `{"id", "title", "kind": "relief", "format"}`.
+  - `POST /api/models/from-image?note=...` (5 MB) → `{"model": {"id", "title"} | null, "message", "spend"}`.
+    It is always `200`: `model` is null and `message` says why when nothing was built. The picture is not kept.
+  - Files are checked by their first bytes (`400` otherwise); a `.gltf` may only embed `data:` URIs.
+  - `GET /api/models/{id}/file` returns the stored bytes.
+  - `PUT /api/models/{id}/info` `{"parts", "size"}` is what the sandbox found in an uploaded file.
+  - Models carry `kind` (`code`, `file` or `relief`), `format`, `info` and `overlay` (Claude's change to an
+    upload). The store keeps the newest 50 and at most 500 MB.
+- `/sandbox/model.html` (static) is served with its own policy instead of the app's: `connect-src blob: data:` (local reads only),
+  `frame-ancestors 'self'`, `sandbox allow-scripts`, `X-Frame-Options: SAMEORIGIN`.
+- New audit kinds:
+  - `claude_usage`: tokens, cost and the month's total per Claude request;
+  - `note_captured`;
+  - `model_built`.
+
+## Outbound connections
+
+`GET /api/egress?since=N` (same login rules as `/api/audit`) lists the requests the backend made to
+other services, oldest first: the last 200, or only those with a `seq` greater than `N`.
+
+```json
+{
+  "entries": [
+    {"seq": 7, "ts_ms": 1794390000000, "scheme": "http", "host": "127.0.0.1", "port": 11434,
+     "purpose": "llm:local", "ok": true, "ms": 712, "local": true}
+  ],
+  "non_loopback": [],
+  "last_seq": 7
+}
+```
+
+`purpose` is `llm:<provider>` or `news:<provider>`. `non_loopback` holds the distinct hosts that are not
+this machine (`localhost`, `127.0.0.0/8`, `::1`). In memory only; a restart clears it. `400` when `since`
+is not a number. See [local-mode.md](local-mode.md#the-wi-fi-off-drill).
 
 ## Events (Sprint 3)
 

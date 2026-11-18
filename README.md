@@ -48,7 +48,10 @@ Marked **(local)** when the feature runs entirely on your PC, with no cloud serv
   Each one is a preview with a 15-second token. Batch actions need two confirmations.
 - **Limits and kill switch (local):** `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours, and a kill switch that blocks writes.
 - **Login (local):** password (Argon2id) with an authenticator code (TOTP), a session cookie, rate limits and lockout. Users are created on the machine itself.
-- **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper, with one Piper voice per persona. Confirmations are read back aloud, and the 15-second window starts when reading finishes. Optional hands-free wake-word mode listens for a persona's wake phrase.
+- **Two modes:** switch between **Trading** (Jarvis or Friday on MT5) and **Assistant** (Jarvis the butler on Claude) in the top bar. The assistant builds a 3D model of anything you ask for ("show me a jet engine"), answers from your notes and saves new ones ("remember that ..."). It has no access to trading, its 3D code runs sealed off in a sandbox, and a monthly cap limits what Claude costs. See [docs/assistant-mode.md](docs/assistant-mode.md).
+- **Notes galaxy (local):** your markdown notes as a 3D galaxy, coloured by folder and linked by `[[wikilinks]]`. Ask "what is my rule for gold on news days?" and the assistant answers from your notes, names the note, and the camera flies to it. Read only. See [docs/notes-galaxy.md](docs/notes-galaxy.md) and [ADR-0021](docs/adr/0021-notes-galaxy.md).
+- **Fully local mode and preflight (local):** `jarvis-api preflight` checks every live chain with real calls (model, voice out, voice in, private files, the web bundle, outbound connections) and prints your machine's latency budget. Every outbound request is logged with its host, so you can prove nothing left the PC. See [docs/local-mode.md](docs/local-mode.md) and [ADR-0020](docs/adr/0020-fully-local-mode.md).
+- **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper, with one Piper voice per persona. Long replies are read in full, sentence by sentence, without gaps. Optional cloned voice through a local VoiceStudio app. Confirmations are read back aloud, and the 15-second window starts when reading finishes. Optional hands-free wake-word mode listens for a persona's wake phrase.
 - **Audit (local):** a SQLite log of every step, with an audit page in the web UI and an API.
 - **Web UI and PWA:** a HUD with an orb, watchlist, positions, transcript, confirm modal, kill switch and audit page. Installable on a phone.
 - **Desktop app (local):** a Tauri 2 window around the same web UI. It contains no trading logic.
@@ -77,6 +80,7 @@ scripts\setup.ps1                      # run it (add -DataFolder <32-character-i
 target\release\jarvis-api.exe user add <name>      # the first login user (asks for a password, shows the QR code)
 scripts\run.ps1                        # start the API and web UI; Ctrl+C stops everything
 scripts\status.ps1                     # health check (exit code 0 = the API is healthy)
+target\release\jarvis-api.exe preflight # every live chain once, with a latency budget (docs/local-mode.md)
 scripts\stop.ps1                       # fallback: stop this repository's processes if run.ps1 did not clean up
 ```
 

@@ -75,3 +75,6 @@ Thumbs.db
 # local state and run logs (scripts/run.ps1, remote-start.ps1, stop.ps1)
 /.local/
 /logs/
+
+# Your own markdown notes (the galaxy page reads them; never committed).
+/notes/

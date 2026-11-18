@@ -14,6 +14,7 @@ mod audio;
 mod stt;
 mod text;
 mod tts;
+pub mod voicestudio;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,9 @@ pub use audio::decode_wav;
 pub use stt::WhisperStt;
 pub use text::{default_corrections, normalize_transcript};
 pub use tts::PiperTts;
+pub use voicestudio::{
+    FallbackTts, StudioLink, VoiceStudioClient, VoiceStudioConfig, VoiceStudioTts,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
@@ -71,6 +75,19 @@ pub trait SpeechToText: Send + Sync {
 pub trait TextToSpeech: Send + Sync {
     /// Returns a complete WAV file.
     async fn synthesize(&self, text: &str) -> Result<Vec<u8>, VoiceError>;
+
+    /// Which engine and voice this is, e.g. `piper:en_GB-alan-medium` (sent to the browser in
+    /// `X-Jarvis-Voice`, and part of the speech cache key).
+    fn voice_id(&self) -> String {
+        "tts".to_owned()
+    }
+
+    /// Like [`synthesize`](Self::synthesize), with the id of the voice that actually spoke this
+    /// line. It differs from [`voice_id`](Self::voice_id) only for a voice with a fallback that
+    /// had to use it. Returned with the audio, so overlapping requests cannot mix up the label.
+    async fn synthesize_labeled(&self, text: &str) -> Result<(Vec<u8>, String), VoiceError> {
+        Ok((self.synthesize(text).await?, self.voice_id()))
+    }
 }
 
 /// `[voice]` section of `config/jarvis.toml`.

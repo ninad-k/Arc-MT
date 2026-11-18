@@ -110,7 +110,8 @@ async fn parses_text_only_with_usage() {
         r.usage,
         Some(Usage {
             input_tokens: 21,
-            output_tokens: 8
+            output_tokens: 8,
+            ..Usage::default()
         })
     );
 }
@@ -273,4 +274,143 @@ async fn inline_think_tags_are_stripped() {
         .unwrap();
     assert_eq!(r.text, None);
     assert_eq!(r.stop_reason, StopReason::MaxTokens);
+}
+
+// ---------------------------------------------------------------- keep warm, empty replies (FL-2)
+
+#[tokio::test]
+async fn keep_alive_defaults_to_thirty_minutes_and_is_configurable() {
+    let server = server_with(reply(json!({"role": "assistant", "content": "ok"}), "stop")).await;
+    provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(first_body(&server).await["keep_alive"], "30m");
+
+    let server = server_with(reply(json!({"role": "assistant", "content": "ok"}), "stop")).await;
+    let mut cfg = config(ProviderKind::Ollama, &server.uri(), 5);
+    cfg.keep_alive = Some("2h".into());
+    OllamaProvider::new(&cfg)
+        .unwrap()
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(first_body(&server).await["keep_alive"], "2h");
+}
+
+/// First call: an empty reply cut off by the token limit. Second call: a real answer.
+async fn empty_then_answer() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(reply(json!({"role": "assistant", "content": ""}), "length"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(reply(
+            json!({"role": "assistant", "content": "Hello."}),
+            "stop",
+        ))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn bodies(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_empty_reply_cut_by_the_limit_is_retried_once_with_a_bigger_budget() {
+    let server = empty_then_answer().await;
+    let r = provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(r.text.as_deref(), Some("Hello."));
+    let sent = bodies(&server).await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["options"]["num_predict"], 777);
+    assert_eq!(sent[1]["options"]["num_predict"], 1554);
+}
+
+#[tokio::test]
+async fn the_retry_budget_is_capped() {
+    let server = empty_then_answer().await;
+    let mut req = simple_request("hi");
+    req.max_tokens = Some(3000);
+    provider(&server, 5).chat(&req).await.unwrap();
+    assert_eq!(bodies(&server).await[1]["options"]["num_predict"], 4096);
+}
+
+#[tokio::test]
+async fn a_second_empty_reply_is_returned_as_it_is() {
+    let server = server_with(reply(json!({"role": "assistant", "content": ""}), "length")).await;
+    let r = provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(r.text, None);
+    assert_eq!(r.stop_reason, StopReason::MaxTokens);
+    assert_eq!(bodies(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_empty_reply_that_stopped_normally_is_retried_once_with_the_same_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(reply(json!({"role": "assistant", "content": ""}), "stop"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(reply(
+            json!({"role": "assistant", "content": "Hello."}),
+            "stop",
+        ))
+        .mount(&server)
+        .await;
+    let r = provider(&server, 5)
+        .chat(&simple_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(r.text.as_deref(), Some("Hello."));
+    let sent = bodies(&server).await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["options"]["num_predict"], 777);
+}
+
+#[tokio::test]
+async fn no_retry_for_an_answer_or_a_tool_call() {
+    for (content, reason) in [("cut off", "length"), ("fine", "stop")] {
+        let server = server_with(reply(
+            json!({"role": "assistant", "content": content}),
+            reason,
+        ))
+        .await;
+        provider(&server, 5)
+            .chat(&simple_request("hi"))
+            .await
+            .unwrap();
+        assert_eq!(bodies(&server).await.len(), 1, "{content:?} {reason}");
+    }
+}
+
+#[tokio::test]
+async fn no_retry_when_the_budget_is_already_at_the_cap() {
+    let server = server_with(reply(json!({"role": "assistant", "content": ""}), "length")).await;
+    let mut req = simple_request("hi");
+    req.max_tokens = Some(4096);
+    provider(&server, 5).chat(&req).await.unwrap();
+    assert_eq!(bodies(&server).await.len(), 1);
 }

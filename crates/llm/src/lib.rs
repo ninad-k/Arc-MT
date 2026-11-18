@@ -30,6 +30,24 @@ pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
 }
 
+/// Where a provider's requests go: its `base_url`, or the default for its kind.
+pub fn effective_base_url(config: &ProviderConfig) -> String {
+    config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(|u| u.trim_end_matches('/').to_owned())
+        .unwrap_or_else(|| {
+            match config.kind {
+                ProviderKind::Anthropic => anthropic::DEFAULT_BASE_URL,
+                ProviderKind::Openai => openai::DEFAULT_BASE_URL,
+                ProviderKind::Ollama => ollama::DEFAULT_BASE_URL,
+            }
+            .to_owned()
+        })
+}
+
 /// Build a provider from config. Reads the API key from the env var named in
 /// `config.api_key_env` (required for Anthropic/OpenAI, ignored for Ollama).
 pub fn build_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, LlmError> {

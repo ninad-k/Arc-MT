@@ -23,7 +23,7 @@
 		const el = document.documentElement;
 		const first = !themed;
 		if (first) el.style.transition = 'none';
-		applyTheme(el, persona.theme, persona.activeId ?? undefined);
+		applyTheme(el, persona.theme, persona.shownId ?? undefined);
 		if (first) {
 			themed = true;
 			void el.offsetWidth; // commit the new values before transitions come back

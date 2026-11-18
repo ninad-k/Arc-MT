@@ -316,19 +316,16 @@ async fn persona_parity_same_conversation_same_outcomes() {
 
 // ------------------------------------------------------------------ system prompt
 
-/// The shared rules block of a composed prompt, without the line that carries the clock.
+/// The shared rules block of a composed prompt. The clock line comes after the closing line,
+/// so it is not part of it.
 fn rules_of(prompt: &str) -> String {
     let start = prompt
-        .find("Current time:")
-        .expect("the rules block starts at the clock line");
+        .find("What you can do:")
+        .expect("the rules block starts with what the model can do");
     let end = prompt
         .rfind("The rules above always win over the personality section.")
         .expect("closing line");
-    prompt[start..end]
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("Current time:"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    prompt[start..end].to_owned()
 }
 
 #[tokio::test]
@@ -355,8 +352,13 @@ async fn both_personas_get_the_identical_shared_rules() {
     assert!(friday.contains("sharp colleague on the trading desk"));
     assert!(!friday.contains("British butler"));
     for prompt in [&jarvis, &friday] {
-        assert!(prompt.ends_with("The rules above always win over the personality section."));
-        assert!(prompt.find(header).unwrap() < prompt.find("Current time:").unwrap());
+        // The clock is last, so the fixed text before it can be cached by a local model.
+        let closing = prompt
+            .find("The rules above always win over the personality section.")
+            .unwrap();
+        assert!(closing < prompt.find("Current time:").unwrap());
+        assert!(prompt.ends_with("(deal times and history dates use server time)."));
+        assert!(prompt.find(header).unwrap() < prompt.find("What you can do:").unwrap());
         for rule in [
             "PROPOSING DOES NOT EXECUTE ANYTHING",
             "NEVER say or imply that a trade was placed",
@@ -1114,7 +1116,8 @@ async fn each_persona_speaks_with_its_own_voice() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{wav}");
 
     let (_, status_body) = get(&app, "/api/status").await;
-    assert_eq!(status_body["voice"], json!({ "stt": false, "tts": true }));
+    assert_eq!(status_body["voice"]["stt"], false);
+    assert_eq!(status_body["voice"]["tts"], true);
     let rows = app.audit.rows(None).await.unwrap();
     let tts_rows: Vec<_> = rows.iter().filter(|r| r.kind == "voice_tts").collect();
     assert_eq!(tts_rows.len(), 3);

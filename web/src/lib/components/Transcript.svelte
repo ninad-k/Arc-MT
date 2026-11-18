@@ -5,17 +5,26 @@
 	import { backend } from '#lib/state/hud.svelte.ts';
 	import { sendTurn } from '#lib/state/turn.svelte.ts';
 	import { voice } from '#lib/state/voice.svelte.ts';
+	import { mode } from '#lib/state/mode.svelte.ts';
+	import { assistant } from '#lib/state/assistant.svelte.ts';
 	import ToolChip from './ToolChip.svelte';
 
 	let scroller = $state<HTMLElement>();
 	let stick = true;
 
-	const SUGGESTIONS = [
+	const TRADING_SUGGESTIONS = [
 		"What's gold at?",
 		'Show my open positions',
 		"What's my equity?",
 		'Buy 0.1 gold with SL 2300'
 	];
+	const ASSISTANT_SUGGESTIONS = [
+		'Show me a 3D model of a jet engine',
+		'Show me the solar system in 3D',
+		'What is my rule for gold on news days?',
+		'Remember that the finish window should be 900 ms'
+	];
+	const SUGGESTIONS = $derived(mode.assistant ? ASSISTANT_SUGGESTIONS : TRADING_SUGGESTIONS);
 
 	function onScroll() {
 		if (!scroller) return;
@@ -51,10 +60,18 @@
 	{#if chat.messages.length === 0 && !voice.busy}
 		<div class="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-4 text-center">
 			<div>
-				<p class="text-sm text-ink">Ask {persona.name} about your markets.</p>
-				<p class="mt-1 text-xs text-mute">
-					Prices, your account and positions, or ask for a trade. Nothing executes until you confirm it.
-				</p>
+				{#if mode.assistant}
+					<p class="text-sm text-ink">Ask {persona.name}, your butler, anything.</p>
+					<p class="mt-1 text-xs text-mute">
+						Ask for a 3D model of anything, ask about your notes, or say "remember that ...". Runs on Claude;
+						no access to trading in this mode.
+					</p>
+				{:else}
+					<p class="text-sm text-ink">Ask {persona.name} about your markets.</p>
+					<p class="mt-1 text-xs text-mute">
+						Prices, your account and positions, or ask for a trade. Nothing executes until you confirm it.
+					</p>
+				{/if}
 			</div>
 			<ul class="flex flex-wrap justify-center gap-2">
 				{#each SUGGESTIONS as s (s)}
@@ -90,6 +107,37 @@
 							<ul class="flex max-w-[92%] flex-wrap gap-1.5 pl-3" aria-label="Tools used">
 								{#each m.toolCalls as c, i (i)}
 									<ToolChip call={c} />
+								{/each}
+							</ul>
+						{/if}
+						{#if m.notes.length}
+							<ul class="flex max-w-[92%] flex-wrap gap-1.5 pl-3" aria-label="From your notes">
+								{#each m.notes as n (n.id)}
+									<li>
+										<a
+											href="/galaxy?note={n.id}"
+											class="num inline-flex items-center gap-1 border border-violet/40 bg-violet/10 px-2 py-0.5 text-2xs text-violet transition-colors hover:border-violet hover:text-ink"
+											data-testid="note-chip"
+										>
+											<span aria-hidden="true">✦</span> from: {n.title}
+										</a>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						{#if m.models?.length}
+							<ul class="flex max-w-[92%] flex-wrap gap-1.5 pl-3" aria-label="3D models">
+								{#each m.models as model (model.id)}
+									<li>
+										<button
+											type="button"
+											class="num inline-flex items-center gap-1 border border-accent/40 bg-accent/10 px-2 py-0.5 text-2xs text-accent transition-colors hover:border-accent hover:text-ink"
+											data-testid="model-chip"
+											onclick={() => assistant.show(model)}
+										>
+											<span aria-hidden="true">◆</span> 3D: {model.title}
+										</button>
+									</li>
 								{/each}
 							</ul>
 						{/if}

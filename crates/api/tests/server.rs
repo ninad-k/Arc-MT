@@ -459,3 +459,52 @@ async fn orders_are_listed_for_the_hud() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["orders"].is_array(), "{body}");
 }
+
+/// The 3D model sandbox page (spec-assistant-mode) gets its own policy: framed by this app only,
+/// no network, a forced sandbox; and its inline runtime never widens the app's own policy.
+#[tokio::test]
+async fn the_sandbox_page_has_its_own_locked_down_policy() {
+    let dir = std::env::temp_dir().join(format!("jarvis-site-{}", uuid::Uuid::new_v4()));
+    write_site(&dir, "window.__boot = 1;");
+    std::fs::create_dir_all(dir.join("sandbox")).unwrap();
+    std::fs::write(
+        dir.join("sandbox/model.html"),
+        "<!doctype html><html><body><script>window.__sandbox = 1;</script></body></html>",
+    )
+    .unwrap();
+    let (app, _mock) = site_app(&dir, false).await;
+
+    let (status, headers, _) =
+        raw_request(&app.router, "GET", "/sandbox/model.html", &[], None).await;
+    assert_eq!(status, StatusCode::OK);
+    let csp = headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(csp, jarvis_api::security::SANDBOX_CSP);
+    // Local blob: and data: reads only (embedded textures): no network scheme.
+    assert!(csp.contains("connect-src blob: data:;") && csp.contains("sandbox allow-scripts"));
+    assert!(!csp.contains("http") && !csp.contains("ws:"), "{csp}");
+    // 'self' appears only as the framing rule.
+    assert_eq!(csp.matches("'self'").count(), 1, "{csp}");
+    assert!(csp.contains("frame-ancestors 'self'"));
+    assert_eq!(headers.get("x-frame-options").unwrap(), "SAMEORIGIN");
+
+    // Every other page keeps the strict app policy, without the sandbox script's hash.
+    let (_, headers, _) = raw_request(&app.router, "GET", "/", &[], None).await;
+    let app_csp = headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(!app_csp.contains("unsafe-eval"), "{app_csp}");
+    assert!(app_csp.contains("frame-ancestors 'none'"));
+    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let sandbox_hash =
+        base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"window.__sandbox = 1;"));
+    assert!(!app_csp.contains(&sandbox_hash), "{app_csp}");
+    std::fs::remove_dir_all(dir).ok();
+}

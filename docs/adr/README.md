@@ -27,6 +27,9 @@ The format is a short [MADR](https://adr.github.io/madr/)-style record. Each ADR
 | [0017](0017-personas.md) | Personas change how Arc MT sounds, not what it may do | Accepted | 2026-10-30 |
 | [0018](0018-broker-symbol-mapping.md) | Broker symbol mapping with canonical names and per-broker layered maps | Accepted | 2026-10-30 |
 | [0019](0019-market-views.md) | Market views computed in code, with the model only reading them back | Accepted | 2026-10-30 |
+| [0020](0020-fully-local-mode.md) | Fully local mode with a measured latency budget and an outbound-connection log | Accepted | 2026-11-11 |
+| [0021](0021-notes-galaxy.md) | Notes galaxy, with answers drawn from the user's own notes | Accepted | 2026-11-11 |
+| [0022](0022-assistant-mode.md) | Two modes, with an Assistant on Claude that builds 3D models in a sandbox | Accepted | 2026-11-11 |
 
 ADRs 0005 to 0015 record decisions made for Sprints 2 to 5. Their features are planned and not yet implemented.
 

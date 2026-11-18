@@ -19,7 +19,16 @@ unmaintained = "workspace"
 # Advisories are denied by default. Ignore an advisory only with a reason and a
 # review date, for example:
 #   { id = "RUSTSEC-0000-0000", reason = "not reachable: we never call X" },
-ignore = []
+ignore = [
+    # SQLite before 3.54.0 can return stale page-cache memory when it opens a database together
+    # with a crafted `-wal` file of another page size. It reaches us through sqlx's bundled
+    # SQLite (libsqlite3-sys 0.30.1); the fix is libsqlite3-sys >= 0.39, which no sqlx release
+    # accepts yet (sqlx 0.8 pins 0.30, sqlx 0.9 allows < 0.38). Arc MT opens only its own
+    # database (`[database] url`, default `data/jarvis.db`), which it creates itself; an attacker
+    # who can plant files in that folder can already rewrite the database. Review by 2027-01-31,
+    # and remove as soon as an sqlx release allows libsqlite3-sys >= 0.39.
+    { id = "RUSTSEC-2026-0459", reason = "local-only, needs write access to our own data folder; no sqlx release can use the fixed libsqlite3-sys yet; review by 2027-01-31" },
+]
 
 [licenses]
 version = 2

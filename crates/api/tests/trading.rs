@@ -155,7 +155,7 @@ fn bridge_for(mock: &MockBridge) -> BridgeClient {
 // ------------------------------------------------------------ rule 1 (tools)
 
 #[tokio::test]
-async fn tool_specs_are_exactly_eight_read_and_four_propose() {
+async fn tool_specs_are_the_read_and_propose_tools_without_notes_when_notes_are_off() {
     let mock = MockBridge::start().await;
     let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let specs = app.state.agent().tools().specs();
@@ -178,7 +178,8 @@ async fn tool_specs_are_exactly_eight_read_and_four_propose() {
             "propose_order",
         ]
     );
-    assert_eq!(ReadTool::ALL.len(), 8);
+    // Nine read tools in all; search_notes is offered only when [notes] is on (off here).
+    assert_eq!(ReadTool::ALL.len(), 9);
     assert_eq!(ProposeTool::ALL.len(), 4);
     for s in &specs {
         assert!(s.description.len() > 40, "{}", s.name);
@@ -1759,7 +1760,8 @@ async fn status_reports_kill_switch_limits_auth_and_voice() {
         json!({ "engaged": false, "reason": null, "changed_at_ms": null })
     );
     assert_eq!(body["auth"], json!({ "enabled": false, "username": null }));
-    assert_eq!(body["voice"], json!({ "stt": false, "tts": false }));
+    assert_eq!(body["voice"]["stt"], false);
+    assert_eq!(body["voice"]["tts"], false);
     assert_eq!(body["limits"]["max_lot"], 1.0);
     assert_eq!(body["limits"]["max_positions"], 5);
     assert_eq!(body["limits"]["max_daily_loss"], 500.0);

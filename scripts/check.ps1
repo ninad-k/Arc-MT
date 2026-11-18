@@ -47,9 +47,12 @@ $ErrorActionPreference = 'Continue'
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $Root
 
-# Advisory ignored in CI too (.github/workflows/security.yml): rsa is in Cargo.lock only through
-# sqlx's optional MySQL driver and is not compiled into any Jarvis MT binary.
-$AuditIgnore = @('--ignore', 'RUSTSEC-2023-0071')
+# Advisories ignored in CI too (.github/workflows/security.yml) and in deny.toml:
+# - RUSTSEC-2023-0071: rsa is in Cargo.lock only through sqlx's optional MySQL driver and is not
+#   compiled into any Jarvis MT binary.
+# - RUSTSEC-2026-0459: SQLite bundled by sqlx; no sqlx release can use the fixed libsqlite3-sys
+#   yet. Local-only, needs write access to our own data folder. Review by 2027-01-31.
+$AuditIgnore = @('--ignore', 'RUSTSEC-2023-0071', '--ignore', 'RUSTSEC-2026-0459')
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:TempDirs = New-Object System.Collections.Generic.List[string]

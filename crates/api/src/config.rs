@@ -9,7 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use jarvis_bridge_client::BridgeKey;
 use jarvis_bridge_client::auth::KEY_ENV;
 use jarvis_gate::Limits;
-use jarvis_llm::ProviderConfig;
+use jarvis_llm::{ProviderConfig, ProviderKind};
 use serde::Deserialize;
 
 use crate::symbols::{alias_key, clean};
@@ -68,6 +68,217 @@ pub struct Config {
     /// `[market]`: intraday market views, the economic calendar and optional news.
     #[serde(default)]
     pub market: MarketConfig,
+    /// `[notes]`: the user's markdown notes (galaxy page and the `search_notes` tool).
+    #[serde(default)]
+    pub notes: NotesConfig,
+    /// `[assistant]`: Assistant mode (Claude, notes, captures, 3D models).
+    #[serde(default)]
+    pub assistant: AssistantConfig,
+}
+
+/// `[assistant]` (spec-assistant-mode). On by default; it needs the provider named here to be
+/// usable (for Claude, `ANTHROPIC_API_KEY` set), and says so when it is not.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// An `[[llm.providers]]` name. Its model answers every assistant turn.
+    #[serde(default = "default_assistant_provider")]
+    pub provider: String,
+    /// `output_config.effort` for chat turns and for 3D builds (`low`..`max`).
+    #[serde(default = "default_chat_effort")]
+    pub chat_effort: String,
+    #[serde(default = "default_build_effort")]
+    pub build_effort: String,
+    /// Assistant mode stops calling the provider once this month's cost reaches it.
+    #[serde(default = "default_monthly_budget")]
+    pub monthly_budget_usd: f64,
+    /// US dollars per million tokens, used to count the cost. Claude Opus 5.5 by default.
+    #[serde(default = "default_price_input")]
+    pub price_input_per_mtok: f64,
+    #[serde(default = "default_price_output")]
+    pub price_output_per_mtok: f64,
+    #[serde(default = "default_price_cache_read")]
+    pub price_cache_read_per_mtok: f64,
+    #[serde(default = "default_price_cache_write")]
+    pub price_cache_write_per_mtok: f64,
+    /// Where built 3D models are kept (the newest 50).
+    #[serde(default = "default_models_dir")]
+    pub models_dir: PathBuf,
+    /// The file that keeps this month's spending.
+    #[serde(default = "default_spend_file")]
+    pub spend_file: PathBuf,
+    /// The largest 3D model code accepted, in KB.
+    #[serde(default = "default_max_model_kb")]
+    pub max_model_kb: usize,
+    /// The sub-folder of `[notes] dir` that "remember that ..." writes to.
+    #[serde(default = "default_captures_dir")]
+    pub captures_dir: String,
+}
+
+fn default_assistant_provider() -> String {
+    "claude".to_owned()
+}
+fn default_chat_effort() -> String {
+    "low".to_owned()
+}
+fn default_build_effort() -> String {
+    // Measured on Claude Opus 5.5: at `high` a model took 5,000-12,000 output tokens (mostly
+    // thinking) and 45-155 s, and complex ones passed the provider timeout. `medium` thinks less.
+    "medium".to_owned()
+}
+fn default_monthly_budget() -> f64 {
+    20.0
+}
+fn default_price_input() -> f64 {
+    4.0
+}
+fn default_price_output() -> f64 {
+    20.0
+}
+fn default_price_cache_read() -> f64 {
+    0.2
+}
+fn default_price_cache_write() -> f64 {
+    5.0
+}
+fn default_models_dir() -> PathBuf {
+    PathBuf::from("data/models3d")
+}
+fn default_spend_file() -> PathBuf {
+    PathBuf::from("data/assistant-spend.json")
+}
+fn default_max_model_kb() -> usize {
+    64
+}
+fn default_captures_dir() -> String {
+    "captures".to_owned()
+}
+
+impl Default for AssistantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: default_assistant_provider(),
+            chat_effort: default_chat_effort(),
+            build_effort: default_build_effort(),
+            monthly_budget_usd: default_monthly_budget(),
+            price_input_per_mtok: default_price_input(),
+            price_output_per_mtok: default_price_output(),
+            price_cache_read_per_mtok: default_price_cache_read(),
+            price_cache_write_per_mtok: default_price_cache_write(),
+            models_dir: default_models_dir(),
+            spend_file: default_spend_file(),
+            max_model_kb: default_max_model_kb(),
+            captures_dir: default_captures_dir(),
+        }
+    }
+}
+
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+impl AssistantConfig {
+    pub fn prices(&self) -> crate::spend::Prices {
+        crate::spend::Prices {
+            input: self.price_input_per_mtok,
+            output: self.price_output_per_mtok,
+            cache_read: self.price_cache_read_per_mtok,
+            cache_write: self.price_cache_write_per_mtok,
+        }
+    }
+
+    /// A provider name that matches no `[[llm.providers]]` entry is not an error here: Assistant
+    /// mode then reports itself unavailable and says why, and Trading mode is unaffected.
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        for (name, value) in [
+            ("chat_effort", &self.chat_effort),
+            ("build_effort", &self.build_effort),
+        ] {
+            if !EFFORTS.contains(&value.as_str()) {
+                bail!("assistant.{name} must be one of {}", EFFORTS.join(", "));
+            }
+        }
+        let money = [
+            ("monthly_budget_usd", self.monthly_budget_usd),
+            ("price_input_per_mtok", self.price_input_per_mtok),
+            ("price_output_per_mtok", self.price_output_per_mtok),
+            ("price_cache_read_per_mtok", self.price_cache_read_per_mtok),
+            (
+                "price_cache_write_per_mtok",
+                self.price_cache_write_per_mtok,
+            ),
+        ];
+        for (name, value) in money {
+            if !(0.0..=100_000.0).contains(&value) {
+                bail!("assistant.{name} must be between 0 and 100000");
+            }
+        }
+        if !(1..=1024).contains(&self.max_model_kb) {
+            bail!("assistant.max_model_kb must be between 1 and 1024");
+        }
+        let plain = !self.captures_dir.is_empty()
+            && !self.captures_dir.starts_with('.')
+            && self
+                .captures_dir
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !plain {
+            bail!("assistant.captures_dir must be one plain folder name, like \"captures\"");
+        }
+        Ok(())
+    }
+}
+
+/// `[notes]`. On by default, reading `notes/`; a missing folder only means "no notes yet".
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotesConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Folder of `.md` files; sub-folders become groups. Read only, never written.
+    #[serde(default = "default_notes_dir")]
+    pub dir: PathBuf,
+    /// Files beyond this many are skipped (at most 3000).
+    #[serde(default = "default_max_notes")]
+    pub max_notes: usize,
+    /// Larger files are skipped.
+    #[serde(default = "default_max_note_kb")]
+    pub max_file_kb: u64,
+}
+
+fn default_notes_dir() -> PathBuf {
+    PathBuf::from("notes")
+}
+fn default_max_notes() -> usize {
+    2000
+}
+fn default_max_note_kb() -> u64 {
+    256
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: default_notes_dir(),
+            max_notes: default_max_notes(),
+            max_file_kb: default_max_note_kb(),
+        }
+    }
+}
+
+impl NotesConfig {
+    pub fn limits(&self) -> jarvis_notes::Limits {
+        jarvis_notes::Limits {
+            // The galaxy lays notes out in the browser (O(n^2) per step): keep it responsive.
+            max_notes: self.max_notes.clamp(1, 3000),
+            max_file_bytes: self.max_file_kb.clamp(1, 4096) * 1024,
+        }
+    }
 }
 
 /// `[market]`. Views are on by default; news is off until a provider is chosen.
@@ -315,6 +526,21 @@ pub struct VoiceSection {
     pub piper_voice: Option<PathBuf>,
     #[serde(default = "default_voice_max_seconds")]
     pub max_seconds: f32,
+    /// Who speaks: Piper (default), or VoiceStudio with Piper as the fallback.
+    #[serde(default)]
+    pub tts_engine: TtsEngine,
+    /// `[voice.voicestudio]`, used when `tts_engine = "voicestudio"`.
+    #[serde(default)]
+    pub voicestudio: Option<jarvis_voice::VoiceStudioConfig>,
+}
+
+/// `[voice] tts_engine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsEngine {
+    #[default]
+    Piper,
+    Voicestudio,
 }
 
 fn default_voice_language() -> String {
@@ -340,6 +566,13 @@ impl VoiceSection {
         };
         if !(self.max_seconds.is_finite() && self.max_seconds > 0.0 && self.max_seconds <= 120.0) {
             bail!("voice.max_seconds must be between 0 and 120");
+        }
+        if self.tts_engine == TtsEngine::Voicestudio {
+            let url = self.voicestudio.as_ref().map_or_else(
+                || jarvis_voice::VoiceStudioConfig::default().url,
+                |v| v.url.clone(),
+            );
+            jarvis_voice::voicestudio::loopback_base(&url).map_err(|e| anyhow!("{e}"))?;
         }
         Ok(Some(jarvis_voice::VoiceConfig {
             enabled: true,
@@ -591,6 +824,24 @@ pub struct LlmConfig {
     pub default: String,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// Load a local (Ollama) default model in the background at start-up, so the first
+    /// question does not wait for it. Default on.
+    #[serde(default = "default_true")]
+    pub warm_up: bool,
+}
+
+impl LlmConfig {
+    /// The provider the start-up warm-up talks to: the default one, when it is Ollama and
+    /// `warm_up` is on. Cloud providers are never warmed up (it would cost a request).
+    pub fn warm_up_provider(&self) -> Option<&ProviderConfig> {
+        if !self.warm_up {
+            return None;
+        }
+        self.providers
+            .iter()
+            .find(|p| p.name == self.default)
+            .filter(|p| p.kind == ProviderKind::Ollama)
+    }
 }
 
 impl Config {
@@ -768,6 +1019,7 @@ impl Config {
         }
         self.validate_trading()?;
         self.market.validate()?;
+        self.assistant.validate()?;
         Ok(())
     }
 
@@ -1047,6 +1299,78 @@ horizon_minutes = 999"#,
     }
 
     #[test]
+    fn only_a_local_default_with_warm_up_on_is_warmed_up() {
+        let local = Config::from_toml_str(&minimal("")).unwrap();
+        assert_eq!(
+            local.llm.warm_up_provider().map(|p| p.name.as_str()),
+            Some("local")
+        );
+        let off = Config::from_toml_str(&minimal("").replace(
+            "default = \"local\"",
+            "default = \"local\"
+warm_up = false",
+        ))
+        .unwrap();
+        assert!(off.llm.warm_up_provider().is_none());
+        let cloud = Config::from_toml_str(
+            r#"
+            [llm]
+            default = "claude"
+            [[llm.providers]]
+            name = "claude"
+            kind = "anthropic"
+            model = "m"
+            "#,
+        )
+        .unwrap();
+        assert!(cloud.llm.warm_up_provider().is_none());
+    }
+
+    #[test]
+    fn voicestudio_is_off_by_default_and_must_be_on_this_machine() {
+        let voice = |extra: &str| {
+            minimal(&format!(
+                "[voice]\nwhisper_model = 'w'\npiper_exe = 'p'\npiper_voice = 'v'\n{extra}"
+            ))
+        };
+        let c = Config::from_toml_str(&voice("")).unwrap();
+        let v = c.voice.as_ref().unwrap();
+        assert_eq!(v.tts_engine, TtsEngine::Piper);
+        assert!(v.voicestudio.is_none());
+
+        let c = Config::from_toml_str(&voice(
+            "tts_engine = 'voicestudio'\n[voice.voicestudio]\n[voice.voicestudio.profiles]\njarvis = 'Jarvis'",
+        ))
+        .unwrap();
+        let v = c.voice.as_ref().unwrap();
+        assert_eq!(v.tts_engine, TtsEngine::Voicestudio);
+        let vs = v.voicestudio.as_ref().unwrap();
+        assert_eq!(vs.url, "http://127.0.0.1:3900");
+        assert_eq!(
+            vs.profiles.get("jarvis").map(String::as_str),
+            Some("Jarvis")
+        );
+        assert!(v.to_voice_config().is_ok());
+
+        let remote = Config::from_toml_str(&voice(
+            "tts_engine = 'voicestudio'\n[voice.voicestudio]\nurl = 'http://10.0.0.5:3900'",
+        ))
+        .unwrap();
+        assert!(remote.voice.unwrap().to_voice_config().is_err());
+    }
+
+    #[test]
+    fn notes_are_on_by_default_and_read_notes_folder() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        assert!(c.notes.enabled);
+        assert_eq!(c.notes.dir, PathBuf::from("notes"));
+        assert_eq!(c.notes.limits().max_file_bytes, 256 * 1024);
+        let off = Config::from_toml_str(&minimal("[notes]\nenabled = false\ndir = 'x'")).unwrap();
+        assert!(!off.notes.enabled);
+        assert!(Config::from_toml_str(&minimal("[notes]\nfolder = 'x'")).is_err());
+    }
+
+    #[test]
     fn example_config_is_valid() {
         let c = Config::from_toml_str(EXAMPLE).unwrap();
         assert_eq!(c.mode, Mode::Demo);
@@ -1294,7 +1618,8 @@ horizon_minutes = 999"#,
         let e = Config::from_toml_str(EXAMPLE).unwrap();
         assert_eq!(e.server.header_read_timeout_secs, 10);
         assert_eq!(e.server.request_timeout_secs, 30);
-        assert_eq!(e.server.long_request_timeout_secs, 200);
+        // Raised for Claude 3D builds (spec-model-uploads, live check).
+        assert_eq!(e.server.long_request_timeout_secs, 300);
         assert_eq!(e.server.max_connections, 256);
         assert_eq!(e.server.chat_rate_limit_per_minute, 20);
         assert_eq!(e.server.transcribe_rate_limit_per_minute, 20);

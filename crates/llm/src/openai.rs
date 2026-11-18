@@ -11,7 +11,8 @@ use crate::{
     ToolCall, Usage,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Where requests go when the config sets no `base_url`.
+pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// OpenAI Chat Completions client.
 pub struct OpenAiProvider {
@@ -56,6 +57,10 @@ impl OpenAiProvider {
         for m in &req.messages {
             match m {
                 Message::User { text } => messages.push(json!({"role": "user", "content": text})),
+                Message::UserImage { text, .. } => messages.push(json!({"role": "user",
+                    "content": format!("{text}
+
+(An image was attached, but this model cannot see images.)")})),
                 Message::Assistant { text, tool_calls } => {
                     let mut msg = json!({
                         "role": "assistant",
@@ -190,6 +195,7 @@ impl OpenAiProvider {
             Usage {
                 input_tokens: n("prompt_tokens"),
                 output_tokens: n("completion_tokens"),
+                ..Usage::default()
             }
         });
 

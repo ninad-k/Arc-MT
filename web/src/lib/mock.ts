@@ -91,6 +91,17 @@ import {
 	prepareFromView
 } from './mock-market-view';
 import { toneWav, wavDurationMs } from './voice/wav';
+import { addCapture, notesGraph, noteText, notesReply } from './mock-notes';
+import {
+	assistantChat,
+	assistantStatus,
+	fromImage,
+	getModel,
+	listModels,
+	modelFile,
+	putInfo,
+	upload
+} from './mock-assistant';
 
 export { onMockEvent };
 
@@ -304,6 +315,17 @@ function chat(req: ChatRequest): ChatResponse {
 
 	if (/fail/.test(text)) {
 		throw new ApiError('llm_error', 'LLM provider failed: connection refused (mock)', 502);
+	}
+
+	const fromNotes = notesReply(req.message);
+	if (fromNotes) {
+		return {
+			session_id: req.session_id ?? crypto.randomUUID(),
+			provider: req.provider ?? 'local',
+			preview: null,
+			persona: activePersona().id,
+			...fromNotes
+		};
 	}
 
 	let proposed: ReturnType<typeof proposal> = null;
@@ -534,7 +556,42 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		if (!req?.message || req.message.length > 2000)
 			throw new ApiError('bad_request', 'message must be 1-2000 characters', 400);
 		await sleep(900, opts.signal);
-		return chat(req) as T;
+		return (req.mode === 'assistant' ? assistantChat(req) : chat(req)) as T;
+	}
+	if (path === '/api/assistant/status') return assistantStatus() as T;
+	if (path === '/api/models') return listModels() as T;
+	{
+		const [route, query = ''] = path.split('?');
+		const q = new URLSearchParams(query);
+		if (route === '/api/models/upload') return (await upload('file', q.get('name') ?? '', opts.blob)) as T;
+		if (route === '/api/models/relief') return (await upload('relief', q.get('name') ?? '', opts.blob)) as T;
+		if (route === '/api/models/from-image') {
+			await sleep(900, opts.signal);
+			return fromImage(q.get('note') ?? '') as T;
+		}
+		const fm = route.match(/^\/api\/models\/([0-9a-f]{12})\/(file|info)$/);
+		if (fm && fm[2] === 'file') {
+			const blob = modelFile(fm[1]);
+			if (!blob) throw new ApiError('not_found', `model ${fm[1]} has no file`, 404);
+			return blob as T;
+		}
+		if (fm && fm[2] === 'info') {
+			if (!putInfo(fm[1], opts.body as Parameters<typeof putInfo>[1])) throw new ApiError('not_found', 'no such model', 404);
+			return { ok: true } as T;
+		}
+	}
+	{
+		const mm = path.match(/^\/api\/models\/([0-9a-f]{12})$/);
+		if (mm) {
+			const model = getModel(mm[1]);
+			if (!model) throw new ApiError('not_found', `no model with id ${mm[1]}`, 404);
+			return model as T;
+		}
+	}
+	if (path === '/api/notes/capture') {
+		const text = String((opts.body as { text?: string })?.text ?? '').trim();
+		if (!text) throw new ApiError('bad_request', 'there is nothing to remember', 400);
+		return addCapture(text) as T;
 	}
 
 	if (path.startsWith('/api/confirm/')) return confirm(tokenOf(path, '/api/confirm/')) as T;
@@ -580,6 +637,15 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	}
 
 	if (path === '/api/audit' || path.startsWith('/api/audit?')) return audit(path) as T;
+	if (path === '/api/notes/graph' || path === '/api/notes/rescan') return notesGraph() as T;
+	{
+		const nm = path.match(/^\/api\/notes\/(\d+)$/);
+		if (nm) {
+			const note = noteText(Number(nm[1]));
+			if (!note) throw new ApiError('not_found', `no note with id ${nm[1]}`, 404);
+			return note as T;
+		}
+	}
 
 	if (path === '/api/voice/transcribe' || path === '/api/voice/transcribe?wake=1') {
 		if (flag('novoice')) throw new ApiError('voice_unavailable', 'voice is disabled', 503);

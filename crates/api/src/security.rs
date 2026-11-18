@@ -41,6 +41,22 @@ impl Security {
     }
 }
 
+/// The page that runs Claude-built 3D models (spec-assistant-mode). It is the only page that
+/// may be framed (by this app only) and the only one allowed to run `eval`, and it gets its own
+/// policy: no network at all, no forms, no plugins, and a forced sandbox (`sandbox
+/// allow-scripts`, so its origin is opaque and it can reach neither the app nor its cookies).
+pub const SANDBOX_PAGE: &str = "/sandbox/model.html";
+
+/// The policy for [`SANDBOX_PAGE`]. The page script is inline; the model code arrives by
+/// `postMessage` and runs through `Function` (hence `unsafe-eval`) in a worker the page starts
+/// from a blob (hence `worker-src blob:`), which keeps this policy, so it cannot reach the network
+/// either. `connect-src blob: data:` lets the glTF loader read textures embedded in an uploaded
+/// file; those are local, and every network scheme stays blocked.
+pub const SANDBOX_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; \
+     style-src 'unsafe-inline'; img-src data: blob:; connect-src blob: data:; font-src 'none'; \
+     media-src 'none'; worker-src blob:; frame-src 'none'; object-src 'none'; \
+     form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
+
 /// The policy for the SPA and the API.
 ///
 /// - Scripts: same origin, plus the hashes of the inline bootstrap script SvelteKit writes
@@ -115,8 +131,12 @@ pub fn collect_inline_script_hashes(dir: &Path) -> Vec<String> {
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                // The hashed assets hold no HTML.
-                if depth < 3 && path.file_name().is_some_and(|n| n != "_app") {
+                // The hashed assets hold no HTML; the sandbox page has its own policy.
+                if depth < 3
+                    && path
+                        .file_name()
+                        .is_some_and(|n| n != "_app" && n != "sandbox")
+                {
                     stack.push((path, depth + 1));
                 }
             } else if meta.len() <= MAX_HTML_BYTES
@@ -252,6 +272,7 @@ pub async fn request_guard(
 /// The outermost middleware.
 pub async fn apply(State(security): State<Arc<Security>>, req: Request, next: Next) -> Response {
     let api = is_api_path(req.uri().path());
+    let sandbox = req.uri().path() == SANDBOX_PAGE;
     let mut response = next.run(req).await;
 
     // Errors raised by axum itself (body too large, wrong method) get the standard shape.
@@ -263,14 +284,26 @@ pub async fn apply(State(security): State<Arc<Security>>, req: Request, next: Ne
     }
 
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_SECURITY_POLICY, security.csp.clone());
+    if sandbox {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(SANDBOX_CSP),
+        );
+        headers.insert(X_FRAME, HeaderValue::from_static("SAMEORIGIN"));
+        headers.insert(
+            PERMISSIONS,
+            HeaderValue::from_static("microphone=(), camera=(), geolocation=()"),
+        );
+    } else {
+        headers.insert(header::CONTENT_SECURITY_POLICY, security.csp.clone());
+        headers.insert(X_FRAME, HeaderValue::from_static("DENY"));
+        headers.insert(
+            PERMISSIONS,
+            HeaderValue::from_static("microphone=(self), camera=(), geolocation=()"),
+        );
+    }
     headers.insert(X_CONTENT_TYPE, HeaderValue::from_static("nosniff"));
-    headers.insert(X_FRAME, HeaderValue::from_static("DENY"));
     headers.insert(REFERRER, HeaderValue::from_static("no-referrer"));
-    headers.insert(
-        PERMISSIONS,
-        HeaderValue::from_static("microphone=(self), camera=(), geolocation=()"),
-    );
     headers.insert(COOP, HeaderValue::from_static("same-origin"));
     if let Some(hsts) = &security.hsts {
         headers.insert(header::STRICT_TRANSPORT_SECURITY, hsts.clone());

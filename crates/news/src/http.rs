@@ -14,6 +14,9 @@ const EXCERPT_CHARS: usize = 200;
 pub(crate) fn build_client() -> Result<reqwest::Client, NewsError> {
     reqwest::Client::builder()
         .connect_timeout(DEFAULT_TIMEOUT)
+        // The outbound-connection log records the configured host; a redirect would reach
+        // another one without it being seen.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("jarvis-news/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| NewsError::Transport(format!("cannot build HTTP client: {}", e.without_url())))

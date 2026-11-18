@@ -21,7 +21,8 @@ export const SERVER_ERROR_CODES = [
 	'trade_failed',
 	'outcome_unknown',
 	'limit_not_stricter',
-	'unknown_broker_symbol'
+	'unknown_broker_symbol',
+	'not_found'
 ] as const;
 
 export type ApiErrorCode = (typeof SERVER_ERROR_CODES)[number];

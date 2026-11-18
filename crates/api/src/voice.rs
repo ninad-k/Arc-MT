@@ -16,8 +16,9 @@ use axum::response::{IntoResponse, Response};
 use jarvis_gate::intent::{self, Intent};
 use jarvis_persona::PersonaPack;
 use jarvis_voice::{
-    Corrections, PiperTts, SpeechToText, TextToSpeech, VoiceConfig, VoiceError, WhisperStt,
-    decode_wav, default_corrections, normalize_transcript,
+    Corrections, FallbackTts, PiperTts, SpeechToText, StudioLink, TextToSpeech, VoiceConfig,
+    VoiceError, VoiceStudioConfig, VoiceStudioTts, WhisperStt, decode_wav, default_corrections,
+    normalize_transcript,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +37,68 @@ const STT_QUEUE_WAIT: Duration = Duration::from_secs(5);
 /// Text-to-speech runs a child process per request; allow two at once.
 const TTS_CONCURRENCY: usize = 2;
 
+/// How many spoken lines the memory cache keeps.
+pub const TTS_CACHE_ENTRIES: usize = 64;
+/// And at most this many bytes of audio in all.
+pub const TTS_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Recently spoken WAVs, by `sha256(persona, voice, text)`, so repeated lines (a greeting, a
+/// read-back) come back at once. In memory only: spoken lines contain account figures, so they
+/// are never written to disk. Least recently used entries go first.
+#[derive(Default)]
+pub struct TtsCache {
+    entries: std::sync::Mutex<std::collections::VecDeque<CacheEntry>>,
+}
+
+/// A cache key and the WAV it names.
+type CacheEntry = ([u8; 32], Arc<Vec<u8>>);
+
+impl TtsCache {
+    pub fn key(persona: &str, voice_id: &str, text: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for part in [persona, voice_id, text] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+        h.finalize().into()
+    }
+
+    pub fn get(&self, key: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let at = entries.iter().position(|(k, _)| k == key)?;
+        let entry = entries.remove(at)?;
+        let wav = entry.1.clone();
+        entries.push_back(entry);
+        Some(wav)
+    }
+
+    pub fn put(&self, key: [u8; 32], wav: Arc<Vec<u8>>) {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        entries.retain(|(k, _)| *k != key);
+        if wav.len() > TTS_CACHE_BYTES {
+            return;
+        }
+        let mut bytes: usize = entries.iter().map(|(_, w)| w.len()).sum();
+        while !entries.is_empty()
+            && (entries.len() >= TTS_CACHE_ENTRIES || bytes + wav.len() > TTS_CACHE_BYTES)
+        {
+            if let Some((_, old)) = entries.pop_front() {
+                bytes -= old.len();
+            }
+        }
+        entries.push_back((key, wav));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// The voice engines and the gates that protect them.
 pub struct Voice {
     stt: Option<Arc<dyn SpeechToText>>,
@@ -48,6 +111,13 @@ pub struct Voice {
     /// One transcription at a time: protects the GPU/CPU.
     stt_gate: Semaphore,
     tts_gate: Semaphore,
+    cache: TtsCache,
+    /// The VoiceStudio voices, for the keep-warm task; empty when Piper speaks alone.
+    studio: Vec<Arc<VoiceStudioTts>>,
+    studio_link: Option<Arc<StudioLink>>,
+    keep_warm: Option<Duration>,
+    /// The voice that spoke the most recent line (`/api/status`).
+    last_spoken: std::sync::Mutex<Option<String>>,
 }
 
 impl Voice {
@@ -69,6 +139,11 @@ impl Voice {
             corrections: default_corrections(),
             stt_gate: Semaphore::new(1),
             tts_gate: Semaphore::new(TTS_CONCURRENCY),
+            cache: TtsCache::default(),
+            studio: Vec::new(),
+            studio_link: None,
+            keep_warm: None,
+            last_spoken: std::sync::Mutex::new(None),
         }
     }
 
@@ -130,6 +205,107 @@ impl Voice {
         voice
     }
 
+    /// Speak with VoiceStudio, each persona falling back to its Piper voice (FL-6). The
+    /// connection is made in the background, so start-up never waits for VoiceStudio; until it
+    /// answers (and whenever it fails) Piper speaks. Call from within the Tokio runtime.
+    pub fn with_voicestudio(
+        mut self,
+        config: &VoiceStudioConfig,
+        personas: &[PersonaPack],
+    ) -> Self {
+        let link = match StudioLink::new(config) {
+            Ok(link) => link,
+            Err(e) => {
+                tracing::warn!("VoiceStudio is not used, Piper speaks instead: {e}");
+                return self;
+            }
+        };
+        link.connect_in_background();
+        for persona in personas {
+            let profile = config
+                .profiles
+                .get(&persona.id)
+                .cloned()
+                .unwrap_or_else(|| persona.name.clone());
+            let studio = Arc::new(VoiceStudioTts::new(link.clone(), &profile));
+            let fallback = self.tts_for(&persona.id);
+            self.persona_tts.insert(
+                persona.id.clone(),
+                Arc::new(FallbackTts::new(studio.clone(), fallback)),
+            );
+            self.studio.push(studio);
+            tracing::info!(persona = %persona.id, profile = %profile, "VoiceStudio voice ready");
+        }
+        self.keep_warm = (config.keep_warm_minutes > 0)
+            .then(|| Duration::from_secs(config.keep_warm_minutes * 60));
+        self.studio_link = Some(link);
+        self
+    }
+
+    /// `[voice]` as configured: the engines, plus VoiceStudio when `tts_engine` asks for it.
+    /// Never fails; a broken part is logged and left off.
+    pub async fn from_section(
+        section: Option<&crate::config::VoiceSection>,
+        personas: &[PersonaPack],
+    ) -> Self {
+        let Some(section) = section else {
+            return Self::disabled();
+        };
+        let voice_config = match section.to_voice_config() {
+            Ok(Some(vc)) => vc,
+            Ok(None) => return Self::disabled(),
+            Err(e) => {
+                tracing::warn!("voice is off: {e:#}");
+                return Self::disabled();
+            }
+        };
+        let voice = Self::from_config(&voice_config, personas).await;
+        if section.tts_engine == crate::config::TtsEngine::Voicestudio {
+            let studio = section.voicestudio.clone().unwrap_or_default();
+            voice.with_voicestudio(&studio, personas)
+        } else {
+            voice
+        }
+    }
+
+    /// Keep the VoiceStudio model loaded: every minute, a voice idle for `keep_warm_minutes`
+    /// renders a short line that is thrown away. `None` when there is nothing to keep warm.
+    pub fn spawn_keep_warm(
+        &self,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let idle = self.keep_warm?;
+        let voices = self.studio.clone();
+        if voices.is_empty() {
+            return None;
+        }
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        for v in &voices {
+                            v.keep_warm(idle).await;
+                        }
+                    }
+                    _ = stop.changed() => break,
+                }
+            }
+        }))
+    }
+
+    /// Engines and the voice that spoke last, for `/api/status`.
+    pub fn status(&self) -> Value {
+        json!({
+            "stt": self.stt_ready(),
+            "tts": self.tts_ready(),
+            "tts_engine": if self.studio.is_empty() { "piper" } else { "voicestudio" },
+            "voicestudio_connected": self.studio_link.as_ref().map(|l| l.is_connected()),
+            "last_voice": self.last_spoken.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        })
+    }
+
     pub fn stt_ready(&self) -> bool {
         self.stt.is_some()
     }
@@ -140,6 +316,23 @@ impl Voice {
     pub fn persona_voice_available(&self, persona: &str) -> bool {
         self.persona_tts.contains_key(persona)
     }
+    /// Speak `text` with `persona`'s voice, outside a request (the preflight).
+    pub async fn synthesize_for(&self, persona: &str, text: &str) -> Result<Vec<u8>, VoiceError> {
+        let tts = self.tts_for(persona).ok_or(VoiceError::NotAvailable)?;
+        tts.synthesize(text).await
+    }
+
+    /// Transcribe a WAV file with the same decoding and clean-up as the transcribe route.
+    pub async fn transcribe_wav(&self, wav: Vec<u8>) -> Result<String, VoiceError> {
+        let stt = self.stt.clone().ok_or(VoiceError::NotAvailable)?;
+        let max_seconds = self.max_seconds;
+        let samples = tokio::task::spawn_blocking(move || decode_wav(&wav, max_seconds))
+            .await
+            .map_err(|e| VoiceError::Audio(e.to_string()))??;
+        let transcript = stt.transcribe(samples).await?;
+        Ok(normalize_transcript(&transcript.text, &self.corrections))
+    }
+
     /// The engine that speaks for `persona`: its own voice, else the shared one.
     fn tts_for(&self, persona: &str) -> Option<Arc<dyn TextToSpeech>> {
         self.persona_tts
@@ -347,16 +540,29 @@ pub async fn speak(
         )));
     }
 
-    let _permit = voice
-        .tts_gate
-        .acquire()
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    let wav = tts.synthesize(text).await.map_err(|e| {
-        tracing::error!("text-to-speech failed: {e}");
-        ApiError::Internal
-    })?;
-    drop(_permit);
+    let voice_id = tts.voice_id();
+    let key = TtsCache::key(&persona, &voice_id, text);
+    let (wav, cached, voice_id) = match voice.cache.get(&key) {
+        Some(wav) => (wav, true, voice_id),
+        None => {
+            let _permit = voice
+                .tts_gate
+                .acquire()
+                .await
+                .map_err(|_| ApiError::Internal)?;
+            let (wav, spoken_by) = tts.synthesize_labeled(text).await.map_err(|e| {
+                tracing::error!("text-to-speech failed: {e}");
+                ApiError::Internal
+            })?;
+            let wav = Arc::new(wav);
+            // A line spoken by the fallback voice is not cached under the main voice's key.
+            if spoken_by == voice_id {
+                voice.cache.put(key, wav.clone());
+            }
+            (wav, false, spoken_by)
+        }
+    };
+    *voice.last_spoken.lock().unwrap_or_else(|p| p.into_inner()) = Some(voice_id.clone());
 
     state
         .audit()
@@ -364,12 +570,69 @@ pub async fn speak(
             None,
             Some(&persona),
             AuditKind::VoiceTts,
-            json!({ "text": text, "chars": chars, "bytes": wav.len(), "persona": persona }),
+            json!({
+                "text": text,
+                "chars": chars,
+                "bytes": wav.len(),
+                "persona": persona,
+                "voice": voice_id,
+                "cached": cached,
+            }),
         )
         .await;
-    let mut response = (StatusCode::OK, wav).into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    let mut response = (StatusCode::OK, wav.as_ref().clone()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    headers.insert(
+        "x-jarvis-cache",
+        HeaderValue::from_static(if cached { "hit" } else { "miss" }),
+    );
+    if let Ok(v) = HeaderValue::from_str(&voice_id) {
+        headers.insert("x-jarvis-voice", v);
+    }
     Ok(response)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_is_bounded_and_keeps_recently_used_lines() {
+        let cache = TtsCache::default();
+        let key = |i: usize| TtsCache::key("jarvis", "piper:v", &format!("line {i}"));
+        for i in 0..TTS_CACHE_ENTRIES {
+            cache.put(key(i), Arc::new(vec![i as u8]));
+        }
+        // Using line 0 makes line 1 the oldest, so line 1 is the one dropped next.
+        assert!(cache.get(&key(0)).is_some());
+        cache.put(key(999), Arc::new(vec![9]));
+        assert_eq!(cache.len(), TTS_CACHE_ENTRIES);
+        assert!(cache.get(&key(0)).is_some());
+        assert!(cache.get(&key(1)).is_none());
+    }
+
+    #[test]
+    fn the_cache_also_has_a_byte_budget() {
+        let cache = TtsCache::default();
+        let big = TTS_CACHE_BYTES / 2 + 1;
+        cache.put(TtsCache::key("p", "v", "a"), Arc::new(vec![0; big]));
+        cache.put(TtsCache::key("p", "v", "b"), Arc::new(vec![0; big]));
+        assert_eq!(cache.len(), 1, "the older one made room");
+        assert!(cache.get(&TtsCache::key("p", "v", "b")).is_some());
+        cache.put(
+            TtsCache::key("p", "v", "huge"),
+            Arc::new(vec![0; TTS_CACHE_BYTES + 1]),
+        );
+        assert!(cache.get(&TtsCache::key("p", "v", "huge")).is_none());
+    }
+
+    #[test]
+    fn the_key_separates_persona_voice_and_text() {
+        let k = TtsCache::key;
+        assert_ne!(k("jarvis", "v", "hi"), k("friday", "v", "hi"));
+        assert_ne!(k("jarvis", "a", "hi"), k("jarvis", "b", "hi"));
+        // Length-prefixed parts: moving a character between parts changes the key.
+        assert_ne!(k("ab", "c", "d"), k("a", "bc", "d"));
+    }
 }

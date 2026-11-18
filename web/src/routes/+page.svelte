@@ -24,6 +24,41 @@
 	import { alerts } from '#lib/state/alerts.svelte.ts';
 	import { briefing } from '#lib/state/briefing.svelte.ts';
 	import { market } from '#lib/state/market.svelte.ts';
+	import { mode } from '#lib/state/mode.svelte.ts';
+	import { assistant } from '#lib/state/assistant.svelte.ts';
+	import ModelStage from '#lib/components/ModelStage.svelte';
+	import ImageUploadSheet from '#lib/components/ImageUploadSheet.svelte';
+	import { uploads } from '#lib/state/uploads.svelte.ts';
+
+	// Dropping a file (spec-model-uploads): a cover over the whole window takes the drop, so it
+	// works over a model too (the 3D frame would swallow it), and a file dropped elsewhere never
+	// makes the browser leave the app.
+	let dropping = $state(false);
+	let dragDepth = 0;
+	const hasFiles = (e: DragEvent) => e.dataTransfer?.types.includes('Files') === true;
+	function onDragEnter(e: DragEvent) {
+		if (!mode.assistant || !hasFiles(e)) return;
+		dragDepth++;
+		dropping = true;
+	}
+	function onDragLeave(e: DragEvent) {
+		if (!dropping || !hasFiles(e)) return;
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0) dropping = false;
+	}
+	function onWindowDrop(e: DragEvent) {
+		if (hasFiles(e)) e.preventDefault();
+		dragDepth = 0;
+		dropping = false;
+	}
+	function onDrop(e: DragEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		dragDepth = 0;
+		dropping = false;
+		const file = e.dataTransfer?.files?.[0];
+		if (file) void uploads.open(file);
+	}
 
 	type Tab = 'chat' | 'watchlist' | 'positions' | 'market';
 	let tab = $state<Tab>('chat');
@@ -54,6 +89,13 @@
 	// Below lg only the selected tab's panel is shown; at lg everything is visible.
 	const show = (t: Tab) => (tab === t ? '' : 'max-lg:hidden');
 
+	// Assistant mode: know whether Claude is usable and what it has built.
+	$effect(() => {
+		if (!mode.assistant) return;
+		void assistant.loadStatus();
+		void assistant.loadRecent();
+	});
+
 	/** "Brief me" from the chat header: open the Market panel on the briefing and build it. */
 	function briefMe() {
 		tab = 'market';
@@ -62,12 +104,107 @@
 	}
 </script>
 
+<svelte:window
+	ondragenter={onDragEnter}
+	ondragleave={onDragLeave}
+	ondragover={(e) => {
+		if (hasFiles(e)) e.preventDefault();
+	}}
+	ondrop={onWindowDrop}
+/>
+
 <ConfirmModal />
+<ImageUploadSheet />
+{#if dropping}
+	<div
+		class="fixed inset-0 z-50 grid place-items-center border-4 border-dashed border-accent bg-void/70 text-base text-ink backdrop-blur-sm"
+		role="region"
+		aria-label="Drop a 3D file or a picture to open it"
+		ondragover={(e) => e.preventDefault()}
+		ondrop={onDrop}
+		data-testid="drop-overlay"
+	>
+		Drop to open in 3D
+	</div>
+{/if}
 <AlertDialog />
+
+{#snippet chatPanel()}
+	<Panel title="Transcript" class="h-full" scroll={false}>
+		{#snippet meta()}
+			{#if chat.sessionId}
+				<span title="Session {chat.sessionId}">session {chat.sessionId.slice(0, 8)}</span>
+			{/if}
+			{#if !mode.assistant}
+				<button
+					type="button"
+					class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink max-lg:hidden"
+					onclick={() => (tab = 'market')}
+				>
+					Market view
+				</button>
+				<button
+					type="button"
+					class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink"
+					title="A summary of your account, positions, today's events and the watchlist"
+					onclick={briefMe}
+				>
+					Brief me
+				</button>
+			{/if}
+			{#if chat.messages.length > 0}
+				<button
+					type="button"
+					class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink disabled:opacity-40"
+					disabled={chat.pending}
+					onclick={() => chat.reset()}
+				>
+					New chat
+				</button>
+			{/if}
+		{/snippet}
+		<Transcript />
+		<Composer />
+	</Panel>
+{/snippet}
 
 <div class="flex h-dvh flex-col">
 	<TopBar />
 
+	{#if mode.assistant}
+		<!-- Assistant mode: the stage (the orb, or the 3D model on screen) and the chat. No MT5 panels. -->
+		<main
+			class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(12rem,1.1fr)_minmax(0,1fr)] gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:grid-cols-[minmax(0,1.5fr)_minmax(22rem,1fr)] lg:grid-rows-1 lg:gap-4"
+			data-testid="assistant-main"
+		>
+			<div class="relative min-h-0" data-testid="stage">
+				{#if assistant.stageModel}
+					<ModelStage model={assistant.stageModel} />
+				{:else}
+					<Orb />
+				{/if}
+			</div>
+			<div class="flex min-h-0 flex-col gap-2">
+				{#if uploads.busy}
+					<p class="border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-ink" role="status" data-testid="upload-busy">
+						{uploads.busy}
+					</p>
+				{/if}
+				{#if assistant.notice}
+					<p
+						class="border px-3 py-1.5 text-xs {assistant.notice.tone === 'bad'
+							? 'border-down/50 bg-down/10 text-down'
+							: 'border-warn/50 bg-warn/10 text-warn'}"
+						role="status"
+						data-testid="assistant-notice"
+					>
+						{assistant.notice.text}
+					</p>
+				{/if}
+				<div class="min-h-0 flex-1">{@render chatPanel()}</div>
+			</div>
+		</main>
+	{:else}
 	<main
 		class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:grid-cols-[18rem_minmax(0,1fr)_19rem] xl:grid-cols-[19rem_minmax(0,1fr)_24rem] lg:grid-rows-[minmax(14rem,1fr)_minmax(18rem,1.15fr)] lg:gap-4"
 	>
@@ -96,40 +233,7 @@
 			aria-labelledby="tab-chat"
 			class="min-h-0 lg:col-start-2 lg:row-start-2 {center === 'market' ? 'lg:hidden' : ''} {show('chat')}"
 		>
-			<Panel title="Transcript" class="h-full" scroll={false}>
-				{#snippet meta()}
-					{#if chat.sessionId}
-						<span title="Session {chat.sessionId}">session {chat.sessionId.slice(0, 8)}</span>
-					{/if}
-					<button
-						type="button"
-						class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink max-lg:hidden"
-						onclick={() => (tab = 'market')}
-					>
-						Market view
-					</button>
-					<button
-						type="button"
-						class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink"
-						title="A summary of your account, positions, today's events and the watchlist"
-						onclick={briefMe}
-					>
-						Brief me
-					</button>
-					{#if chat.messages.length > 0}
-						<button
-							type="button"
-							class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink disabled:opacity-40"
-							disabled={chat.pending}
-							onclick={() => chat.reset()}
-						>
-							New chat
-						</button>
-					{/if}
-				{/snippet}
-				<Transcript />
-				<Composer />
-			</Panel>
+			{@render chatPanel()}
 		</div>
 
 		<!-- Market view -->
@@ -153,4 +257,5 @@
 			<div class="min-h-0 flex-1"><Positions /></div>
 		</div>
 	</main>
+	{/if}
 </div>

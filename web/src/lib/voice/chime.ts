@@ -3,6 +3,8 @@
  * audio file to load (the CSP only allows same-origin scripts and this needs nothing else).
  */
 
+import { isMuted } from './sequence';
+
 export interface ChimeNote {
 	/** Hertz. */
 	freq: number;
@@ -30,7 +32,7 @@ export function chimeLength(notes: readonly ChimeNote[] = CHIME): number {
  * running, which is what a browser gives before the user has touched the page.
  */
 export function playChime(ctx: AudioContext | null, notes: readonly ChimeNote[] = CHIME): boolean {
-	if (!ctx || ctx.state !== 'running') return false;
+	if (!ctx || ctx.state !== 'running' || isMuted()) return false;
 	const t0 = ctx.currentTime + 0.01;
 	for (const n of notes) {
 		const osc = ctx.createOscillator();

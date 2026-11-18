@@ -160,6 +160,15 @@ impl TextToSpeech for PiperTts {
         }
         Ok(wav)
     }
+
+    fn voice_id(&self) -> String {
+        let stem = self
+            .voice
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("piper:{stem}")
+    }
 }
 
 // --- Pure helpers ------------------------------------------------------------------

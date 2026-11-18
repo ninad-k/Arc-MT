@@ -8,6 +8,11 @@
 //!   provider keeps them in a small private cache keyed by tool-call id and re-attaches them
 //!   when the assistant turn is sent back.
 //! - Forced `tool_choice` is rejected by current models; it is never sent (default `auto`).
+//! - The last tool carries `cache_control`, and so does the system prompt when the request says
+//!   it is fixed (`cache_system`), so the fixed part of a request is read from the prompt cache
+//!   (about a tenth of the input price).
+//! - `refusal_fallback` sends `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`):
+//!   a declined request is re-run on another Claude model inside the same call.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -22,9 +27,11 @@ use crate::{
     ToolCall, Usage,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// Where requests go when the config sets no `base_url`.
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const THINKING_CACHE_CAP: usize = 256;
+const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
 /// Anthropic Messages API client.
 pub struct AnthropicProvider {
@@ -35,6 +42,7 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     thinking: Option<Value>,
     effort: Option<String>,
+    refusal_fallback: bool,
     /// (first tool-call id of an assistant turn, thinking blocks to replay before it).
     thinking_cache: Mutex<VecDeque<(String, Vec<Value>)>>,
 }
@@ -58,6 +66,9 @@ impl AnthropicProvider {
         headers.insert(k, v);
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if config.refusal_fallback {
+            headers.insert("anthropic-beta", HeaderValue::from_static(FALLBACK_BETA));
+        }
         Ok(Self {
             name: config.name.clone(),
             model: config.model.clone(),
@@ -66,6 +77,7 @@ impl AnthropicProvider {
             client: util::build_client(config, headers)?,
             thinking: None,
             effort: None,
+            refusal_fallback: config.refusal_fallback,
             thinking_cache: Mutex::new(VecDeque::new()),
         })
     }
@@ -77,7 +89,8 @@ impl AnthropicProvider {
         self
     }
 
-    /// Send `output_config.effort` (`low`..`max`). Default: not sent (model default).
+    /// Send `output_config.effort` (`low`..`max`) when the request names none. Default: not
+    /// sent (model default).
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
         self
@@ -89,27 +102,42 @@ impl AnthropicProvider {
             "max_tokens": req.max_tokens.unwrap_or(self.max_tokens),
             "messages": self.build_messages(&req.messages),
         });
+        // Render order is tools, then system, then messages: marking the system prompt caches
+        // both, and marking the last tool also covers a request without a system prompt.
         if let Some(system) = req.system.as_deref().filter(|s| !s.trim().is_empty()) {
-            body["system"] = json!(system);
+            body["system"] = if req.cache_system {
+                json!([{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}])
+            } else {
+                json!(system)
+            };
         }
         if !req.tools.is_empty() {
+            let last = req.tools.len() - 1;
             body["tools"] = req
                 .tools
                 .iter()
-                .map(|t| {
-                    json!({
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut tool = json!({
                         "name": t.name,
                         "description": t.description,
                         "input_schema": schema_or_empty(&t.parameters),
-                    })
+                    });
+                    if i == last {
+                        tool["cache_control"] = json!({"type": "ephemeral"});
+                    }
+                    tool
                 })
                 .collect();
         }
         if let Some(t) = &self.thinking {
             body["thinking"] = t.clone();
         }
-        if let Some(e) = &self.effort {
+        if let Some(e) = req.effort.as_ref().or(self.effort.as_ref()) {
             body["output_config"] = json!({"effort": e});
+        }
+        if self.refusal_fallback {
+            body["fallbacks"] = json!("default");
         }
         body
     }
@@ -131,6 +159,15 @@ impl AnthropicProvider {
         for m in messages {
             match m {
                 Message::User { text } => texts.push(json!({"type": "text", "text": text})),
+                Message::UserImage {
+                    text,
+                    media_type,
+                    data_base64,
+                } => {
+                    texts.push(json!({"type": "image", "source": {
+                        "type": "base64", "media_type": media_type, "data": data_base64}}));
+                    texts.push(json!({"type": "text", "text": text}));
+                }
                 Message::ToolResult {
                     call_id,
                     content,
@@ -248,6 +285,7 @@ impl AnthropicProvider {
             Some("end_turn") | Some("stop_sequence") => StopReason::EndTurn,
             Some("tool_use") => StopReason::ToolUse,
             Some("max_tokens") => StopReason::MaxTokens,
+            Some("refusal") => StopReason::Refusal,
             Some(other) => StopReason::Other(other.to_string()),
             None if !tool_calls.is_empty() => StopReason::ToolUse,
             None => StopReason::EndTurn,
@@ -257,9 +295,12 @@ impl AnthropicProvider {
             // Total prompt tokens, including prompt-cache reads/writes.
             let input =
                 n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+            let clamp = |x: u64| x.min(u32::MAX as u64) as u32;
             Usage {
-                input_tokens: input.min(u32::MAX as u64) as u32,
-                output_tokens: n("output_tokens").min(u32::MAX as u64) as u32,
+                input_tokens: clamp(input),
+                output_tokens: clamp(n("output_tokens")),
+                cache_read_tokens: clamp(n("cache_read_input_tokens")),
+                cache_write_tokens: clamp(n("cache_creation_input_tokens")),
             }
         });
         Ok(ChatResponse {

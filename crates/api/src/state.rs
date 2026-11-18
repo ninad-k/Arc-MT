@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use jarvis_bridge_client::protocol::{PingInfo, TradeMode};
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
 use jarvis_gate::KillSwitch;
-use jarvis_llm::{LlmProvider, ProviderConfig, ProviderKind, build_provider};
+use jarvis_llm::{LlmProvider, ProviderConfig, ProviderKind, build_provider, effective_base_url};
+
+use crate::egress::{EgressLog, EgressNews, EgressProvider};
 use jarvis_news::{AlphaVantage, Finnhub, NewsService};
 use jarvis_persona::{PersonaPack, PersonaRegistry, Theme};
 use serde_json::{Value, json};
@@ -211,7 +213,7 @@ fn load_personas_or_builtin(config: &Config) -> PersonaRegistry {
     }
 }
 
-fn builtin_personas() -> PersonaRegistry {
+pub(crate) fn builtin_personas() -> PersonaRegistry {
     let jarvis = PersonaPack {
         id: "jarvis".to_owned(),
         name: "Jarvis".to_owned(),
@@ -263,6 +265,12 @@ struct Inner {
     market_limiter: RateLimiter,
     /// Market views, the calendar and news; `None` when `[market] enabled = false`.
     market: Option<Arc<MarketService>>,
+    /// Every outbound request to another service (FL-3).
+    egress: Arc<EgressLog>,
+    /// The user's notes; `None` when `[notes] enabled = false`.
+    notes: Option<Arc<jarvis_notes::NotesService>>,
+    /// Assistant mode; `None` when `[assistant] enabled = false`.
+    assistant: Option<Arc<crate::assistant::Assistant>>,
 }
 
 /// The window of the per-session request budgets.
@@ -327,15 +335,26 @@ impl AppState {
             .personas
             .unwrap_or_else(|| load_personas_or_builtin(&config));
         let settings = SettingsStore::new(audit.pool().clone());
+        let egress = EgressLog::new();
         let providers = config
             .llm
             .providers
             .iter()
             .map(|p| ProviderEntry {
                 config: p.clone(),
-                slot: slots
-                    .remove(&p.name)
-                    .unwrap_or_else(|| ProviderSlot::Unavailable("not configured".to_owned())),
+                slot: match slots.remove(&p.name) {
+                    // Every model request is recorded with the host it goes to.
+                    Some(ProviderSlot::Available(provider)) => {
+                        ProviderSlot::Available(EgressProvider::wrap(
+                            provider,
+                            &effective_base_url(p),
+                            &p.name,
+                            egress.clone(),
+                        ))
+                    }
+                    Some(other) => other,
+                    None => ProviderSlot::Unavailable("not configured".to_owned()),
+                },
             })
             .collect();
         let clock = ServerClock::default();
@@ -359,7 +378,11 @@ impl AppState {
         });
         let market = config.market.enabled.then(|| {
             let news = overrides.news.unwrap_or_else(|| {
-                news_from_config(&config.market.news, |name| std::env::var(name).ok())
+                news_from_config(
+                    &config.market.news,
+                    |name| std::env::var(name).ok(),
+                    &egress,
+                )
             });
             MarketService::new(MarketParts {
                 bridge: bridge.clone(),
@@ -374,8 +397,37 @@ impl AppState {
         if let Some(market) = &market {
             tools = tools.with_market(market.clone());
         }
+        let notes = config.notes.enabled.then(|| {
+            Arc::new(jarvis_notes::NotesService::new(
+                config.notes.dir.clone(),
+                config.notes.limits(),
+            ))
+        });
+        if let Some(notes) = &notes {
+            tools = tools.with_notes(notes.clone());
+        }
         let market_per_minute = config.market.rate_limit_per_minute;
         let agent = Agent::new(tools, audit.clone(), clock.clone());
+        // Assistant mode: its own loop and tools, with no bridge, trading or market service.
+        let assistant = config.assistant.enabled.then(|| {
+            let a = &config.assistant;
+            Arc::new(crate::assistant::Assistant::new(
+                crate::assistant::AssistantParts {
+                    audit: audit.clone(),
+                    notes: notes.clone(),
+                    captures_dir: a.captures_dir.clone(),
+                    models: Arc::new(crate::models3d::ModelStore::new(a.models_dir.clone())),
+                    spend: Arc::new(crate::spend::SpendMeter::new(
+                        Some(a.spend_file.clone()),
+                        a.monthly_budget_usd,
+                        a.prices(),
+                    )),
+                    chat_effort: a.chat_effort.clone(),
+                    build_effort: a.build_effort.clone(),
+                    max_model_bytes: a.max_model_kb * 1024,
+                },
+            ))
+        });
         Self(Arc::new(Inner {
             config,
             bridge,
@@ -399,6 +451,9 @@ impl AppState {
             transcribe_limiter: RateLimiter::new(transcribe_per_minute, REQUEST_RATE_WINDOW_MS),
             market_limiter: RateLimiter::new(market_per_minute, REQUEST_RATE_WINDOW_MS),
             market,
+            egress,
+            notes,
+            assistant,
         }))
     }
 
@@ -464,16 +519,7 @@ impl AppState {
             );
             None
         };
-        let voice = match config.voice.as_ref().map(|v| v.to_voice_config()) {
-            Some(Ok(Some(voice_config))) => {
-                Voice::from_config(&voice_config, personas.list()).await
-            }
-            Some(Err(e)) => {
-                tracing::warn!("voice is off: {e:#}");
-                Voice::disabled()
-            }
-            _ => Voice::disabled(),
-        };
+        let voice = Voice::from_section(config.voice.as_ref(), personas.list()).await;
         let mut slots = HashMap::new();
         for p in &config.llm.providers {
             let slot = match build_provider(p) {
@@ -579,6 +625,39 @@ impl AppState {
             "enabled": self.0.config.auth.enabled,
             "username": session.map(|s| s.username.as_str()),
         })
+    }
+    /// The user's notes, when `[notes]` is on.
+    pub fn notes(&self) -> Option<&Arc<jarvis_notes::NotesService>> {
+        self.0.notes.as_ref()
+    }
+    /// Assistant mode, when `[assistant]` is on.
+    pub fn assistant(&self) -> Option<&Arc<crate::assistant::Assistant>> {
+        self.0.assistant.as_ref()
+    }
+
+    /// The provider Assistant mode answers with, or why it cannot be used.
+    pub fn assistant_provider(&self) -> Result<Arc<dyn jarvis_llm::LlmProvider>, String> {
+        let name = &self.0.config.assistant.provider;
+        match self.provider(name) {
+            None => Err(format!(
+                "no [[llm.providers]] entry is named '{name}' ([assistant] provider)"
+            )),
+            // Prices, effort and prompt caching are Claude's: another kind would be mislabelled
+            // and mispriced.
+            Some(entry) if entry.config.kind != ProviderKind::Anthropic => Err(format!(
+                "Assistant mode needs a Claude (anthropic) provider; '{name}' is {}",
+                entry.kind_str()
+            )),
+            Some(entry) => match &entry.slot {
+                ProviderSlot::Available(p) => Ok(p.clone()),
+                ProviderSlot::Unavailable(reason) => Err(reason.clone()),
+            },
+        }
+    }
+
+    /// The outbound-connection log.
+    pub fn egress(&self) -> &Arc<EgressLog> {
+        &self.0.egress
     }
     pub fn voice(&self) -> &Voice {
         &self.0.voice
@@ -749,7 +828,7 @@ impl AppState {
     }
     /// `voice` object of `GET /api/status`.
     pub fn voice_status(&self) -> Value {
-        json!({ "stt": self.0.voice.stt_ready(), "tts": self.0.voice.tts_ready() })
+        self.0.voice.status()
     }
     /// Fires when the server begins to stop; WebSocket tasks close on it.
     pub fn shutdown(&self) -> &ShutdownSignal {
@@ -834,6 +913,57 @@ impl AppState {
         })
     }
 
+    /// Load the local default model with one tiny request, so the first real question does
+    /// not wait for it (FL-2). Returns the provider name when the model answered. Never
+    /// fails: a model that is not running yet is only a warning.
+    pub async fn warm_up(&self) -> Option<String> {
+        let name = self.config().llm.warm_up_provider()?.name.clone();
+        let ProviderSlot::Available(provider) = &self.provider(&name)?.slot else {
+            return None;
+        };
+        let started = std::time::Instant::now();
+        let request = jarvis_llm::ChatRequest {
+            system: None,
+            messages: vec![jarvis_llm::Message::User {
+                text: "Reply with the single word OK.".to_owned(),
+            }],
+            tools: vec![],
+            max_tokens: Some(8),
+            temperature: Some(0.0),
+            effort: None,
+            cache_system: false,
+        };
+        match provider.chat(&request).await {
+            Ok(_) => {
+                tracing::info!(
+                    provider = %name,
+                    seconds = started.elapsed().as_secs_f32(),
+                    "local model loaded"
+                );
+                Some(name)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = %name,
+                    "could not load the local model at start-up ({e}); the first question will load it \
+                     instead. Is Ollama running?"
+                );
+                None
+            }
+        }
+    }
+
+    /// Keep a VoiceStudio voice loaded while the server runs (FL-6); `None` without one.
+    pub fn spawn_voice_keep_warm(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.0.voice.spawn_keep_warm(self.0.shutdown.subscribe())
+    }
+
+    /// [`AppState::warm_up`] in the background; start-up never waits for it.
+    pub fn spawn_warm_up(&self) -> tokio::task::JoinHandle<Option<String>> {
+        let state = self.clone();
+        tokio::spawn(async move { state.warm_up().await })
+    }
+
     /// Start the task that scores the market views every [`MARKET_EVALUATE_EVERY`]: open views
     /// against the M5 bars since they were made. It runs once at start-up (to catch up after
     /// a restart) and stops when the server shuts down. `None` when market views are off.
@@ -896,6 +1026,7 @@ impl AppState {
 pub fn news_from_config(
     cfg: &MarketNewsConfig,
     env: impl Fn(&str) -> Option<String>,
+    egress: &Arc<EgressLog>,
 ) -> NewsService {
     if cfg.provider == NewsProviderKind::None {
         return NewsService::disabled();
@@ -920,7 +1051,7 @@ pub fn news_from_config(
     match provider {
         Ok(p) => {
             tracing::info!(provider = cfg.provider.as_str(), "news provider ready");
-            NewsService::new(p).with_ttl(ttl)
+            NewsService::new(EgressNews::wrap(p, egress.clone())).with_ttl(ttl)
         }
         Err(e) => {
             tracing::warn!(
@@ -958,22 +1089,29 @@ mod news_config_tests {
         let news = news_from_config(
             &cfg(NewsProviderKind::None, Some("FINNHUB_API_KEY")),
             env_with(&[("FINNHUB_API_KEY", "abc")]),
+            &EgressLog::new(),
         );
         assert!(!news.is_configured());
     }
 
     #[tokio::test]
     async fn a_provider_without_a_key_runs_as_not_configured() {
-        let none = news_from_config(&cfg(NewsProviderKind::Finnhub, None), env_with(&[]));
+        let none = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, None),
+            env_with(&[]),
+            &EgressLog::new(),
+        );
         assert!(!none.is_configured());
         let empty = news_from_config(
             &cfg(NewsProviderKind::Finnhub, None),
             env_with(&[("FINNHUB_API_KEY", "")]),
+            &EgressLog::new(),
         );
         assert!(!empty.is_configured());
         let blank = news_from_config(
             &cfg(NewsProviderKind::Finnhub, None),
             env_with(&[("FINNHUB_API_KEY", "   ")]),
+            &EgressLog::new(),
         );
         assert!(!blank.is_configured());
         assert_eq!(blank.provider_name(), None);
@@ -986,16 +1124,29 @@ mod news_config_tests {
             ("ALPHAVANTAGE_API_KEY", "av-key"),
             ("MY_NEWS_KEY", "mine"),
         ]);
-        let finnhub = news_from_config(&cfg(NewsProviderKind::Finnhub, None), &env);
+        let finnhub = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, None),
+            &env,
+            &EgressLog::new(),
+        );
         assert_eq!(finnhub.provider_name(), Some("finnhub"));
-        let alpha = news_from_config(&cfg(NewsProviderKind::Alphavantage, None), &env);
+        let alpha = news_from_config(
+            &cfg(NewsProviderKind::Alphavantage, None),
+            &env,
+            &EgressLog::new(),
+        );
         assert_eq!(alpha.provider_name(), Some("alphavantage"));
-        let custom = news_from_config(&cfg(NewsProviderKind::Finnhub, Some("MY_NEWS_KEY")), &env);
+        let custom = news_from_config(
+            &cfg(NewsProviderKind::Finnhub, Some("MY_NEWS_KEY")),
+            &env,
+            &EgressLog::new(),
+        );
         assert!(custom.is_configured());
         // The named variable is the one read: the usual one is ignored.
         let wrong = news_from_config(
             &cfg(NewsProviderKind::Finnhub, Some("OTHER")),
             env_with(&[("FINNHUB_API_KEY", "fh-key")]),
+            &EgressLog::new(),
         );
         assert!(!wrong.is_configured());
     }

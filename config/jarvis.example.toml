@@ -22,7 +22,7 @@ bind = "127.0.0.1:8787"
 # the server up). Every one needs a restart.
 # header_read_timeout_secs = 10          # time to send a request's headers; also ends idle keep-alive connections
 # request_timeout_secs = 30              # most routes, body upload included (the WebSocket has no limit)
-# long_request_timeout_secs = 200        # /api/chat, /api/voice/*, /api/confirm/*; keep above your slowest provider's timeout_secs
+long_request_timeout_secs = 300         # /api/chat, /api/voice/*, /api/confirm/*; keep above your slowest provider's timeout_secs (Claude 3D builds: 240)
 # max_connections = 256                  # open connections at once; more are closed at once
 # chat_rate_limit_per_minute = 20        # POST /api/chat per session (each can cost several model calls)
 # transcribe_rate_limit_per_minute = 20  # POST /api/voice/transcribe per session
@@ -88,19 +88,24 @@ btc = "BTCUSD"
 [llm]
 # Provider used when a chat request does not name one.
 default = "local"
+# Load the local default model in the background at start-up (never delays start-up).
+warm_up = true
 
 [[llm.providers]]
 name = "local"
 kind = "ollama"
-model = "qwen3.5:9b"            # fits an 8 GB GPU; ~2 s per reply once loaded
+model = "qwen3.5:9b"            # fits an 8 GB GPU; measure yours with `jarvis-api preflight`
 base_url = "http://127.0.0.1:11434"
-timeout_secs = 180              # the first request after a cold start loads the model (~100 s)
+timeout_secs = 180              # the first request after a cold start loads the model (~40-100 s)
+keep_alive = "30m"              # how long Ollama keeps the model loaded after a request
 
 [[llm.providers]]
 name = "claude"
 kind = "anthropic"
-model = "claude-sonnet-5-5"
+model = "claude-opus-5-5"       # Assistant mode's brain ([assistant] provider = "claude")
 api_key_env = "ANTHROPIC_API_KEY"
+timeout_secs = 240              # building a 3D model can take two to three minutes
+refusal_fallback = true         # a declined request is re-run on another Claude model (billed at its rate)
 
 [[llm.providers]]
 name = "openai"
@@ -147,6 +152,17 @@ threads = 4
 piper_exe = "models/piper/piper.exe"
 piper_voice = "models/piper/en_US-lessac-medium.onnx"
 max_seconds = 30
+# Who speaks: "piper" (default) or "voicestudio" (a local cloned voice; Piper stays the fallback).
+# See docs/local-mode.md before switching.
+tts_engine = "piper"
+# [voice.voicestudio]
+# url = "http://127.0.0.1:3900"      # must be this machine
+# engine = "mlx-audio"
+# model_id = "mlx-community/csm-1b-8bit"
+# keep_warm_minutes = 10
+# [voice.voicestudio.profiles]
+# jarvis = "Jarvis"
+# friday = "Friday"
 
 # ---- Personas. Packs live in this folder as <id>.toml (see personas/jarvis.toml).
 # A persona changes name, personality, voice, wake phrase and colours only; all safety
@@ -180,3 +196,29 @@ cache_minutes = 10
 # of jarvis_market::ViewConfig; leave this out unless you know what you are changing.
 # [market.view]
 # weight_h4_trend = 25.0
+
+# ---- Notes galaxy: your markdown notes as a 3D map, and answers drawn from them (docs/notes-galaxy.md).
+# Read only. Sub-folders become colour groups. Sample notes: examples/notes.
+[notes]
+enabled = true
+dir = "notes"
+
+# ---- Assistant mode: Jarvis the butler on Claude, with your notes, "remember that ..." and 3D models
+# (docs/assistant-mode.md). Switch with Trading | Assistant in the top bar. It has no MT5 tools at all.
+# Needs ANTHROPIC_API_KEY for the server; without it the mode says so and sends nothing anywhere.
+# Costs money: Claude Opus 5.5 is $4 per million input tokens and $20 per million output tokens
+# (https://www.anthropic.com/pricing). About $0.01-0.02 a reply and $0.10-0.25 a 3D model.
+[assistant]
+enabled = true
+provider = "claude"             # an [[llm.providers]] name
+chat_effort = "low"             # low | medium | high | xhigh | max
+build_effort = "medium"         # for building 3D models; "high" is more detailed but slower
+monthly_budget_usd = 20.0       # nothing is sent to Claude once this month's cost reaches it
+price_input_per_mtok = 4.0      # update these if Anthropic's prices change
+price_output_per_mtok = 20.0
+price_cache_read_per_mtok = 0.2
+price_cache_write_per_mtok = 5.0
+models_dir = "data/models3d"    # built models (the newest 50)
+spend_file = "data/assistant-spend.json"
+max_model_kb = 64
+captures_dir = "captures"       # "remember that ..." writes notes into [notes] dir / this folder

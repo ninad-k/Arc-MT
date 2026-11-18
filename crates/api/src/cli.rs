@@ -35,6 +35,19 @@ pub enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Check every live chain once (model, voice out, voice in, served files, web bundle,
+    /// outbound connections) and print a latency budget. Exit code 1 when a check fails.
+    Preflight {
+        /// The running server's base URL (default: from `[server] bind`).
+        #[arg(long, value_name = "URL")]
+        api: Option<String>,
+        /// Skip the model check.
+        #[arg(long)]
+        skip_chat: bool,
+        /// Print one JSON document instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]

@@ -5,6 +5,10 @@
 	import { settings } from '#lib/state/settings.svelte.ts';
 	import type { Feedback } from '#lib/state/settings-context.ts';
 	import SettingsSection from './SettingsSection.svelte';
+	import { onMount } from 'svelte';
+	import { assistant } from '#lib/state/assistant.svelte.ts';
+
+	onMount(() => void assistant.loadStatus());
 
 	let { llm }: { llm: { default: string; providers: LlmProvider[] } | null } = $props();
 
@@ -76,5 +80,23 @@
 					.join(', ')}. Set the key in the server's environment and restart it.
 			</p>
 		{/if}
+	{/if}
+
+	<!-- Assistant mode always answers with its own configured model (spec-assistant-mode). -->
+	{#if assistant.status?.enabled}
+		{@const a = assistant.status}
+		<div class="max-w-md border-t border-line pt-3 text-xs" data-testid="assistant-settings">
+			<p class="hud-title">Assistant mode</p>
+			<p class="mt-1 text-mute">
+				Always answers with <span class="text-ink">{a.brain?.provider ?? '?'} · {a.brain?.model ?? '?'}</span>{a.available ? '' : ` (unavailable: ${a.reason ?? 'not set up'})`}.
+			</p>
+			{#if a.spend}
+				<p class="mt-1 {a.spend.blocked ? 'text-down' : a.spend.warn ? 'text-warn' : 'text-mute'}">
+					Claude this month ({a.spend.month}): <span class="num">${a.spend.spent_usd.toFixed(2)}</span> of a
+					<span class="num">${a.spend.budget_usd.toFixed(2)}</span> cap{a.spend.blocked ? ', reached: Assistant mode is paused until next month' : ''}.
+					Change the cap with [assistant] monthly_budget_usd in the server config.
+				</p>
+			{/if}
+		</div>
 	{/if}
 </SettingsSection>

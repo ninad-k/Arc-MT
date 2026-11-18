@@ -8,18 +8,24 @@
 //! WebSocket event feed, the voice routes and, when configured, TLS.
 
 pub mod agent;
+pub mod assistant;
+pub mod assistant_routes;
 pub mod audit;
 pub mod auth;
 pub mod broker;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod egress;
 pub mod events;
 pub mod grounding;
 pub mod limit_overrides;
 pub mod market;
 pub mod market_journal;
 pub mod market_routes;
+pub mod models3d;
+pub mod notes_routes;
+pub mod preflight;
 pub mod ratelimit;
 pub mod routes;
 pub mod security;
@@ -29,6 +35,7 @@ pub mod service;
 pub mod settings;
 pub mod settings_routes;
 pub mod sizing;
+pub mod spend;
 pub mod state;
 pub mod static_site;
 pub mod symbols;

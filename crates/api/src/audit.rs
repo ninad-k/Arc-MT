@@ -53,6 +53,12 @@ pub enum AuditKind {
     MarketView,
     /// A market view was turned into a trade preview request from the UI.
     MarketPrepare,
+    /// One Claude request in Assistant mode: tokens, cost and the month's total.
+    ClaudeUsage,
+    /// "Remember that ...": a note was written to the captures folder.
+    NoteCaptured,
+    /// A 3D model was built (or changed) in Assistant mode.
+    ModelBuilt,
 }
 
 impl AuditKind {
@@ -83,6 +89,9 @@ impl AuditKind {
             AuditKind::SymbolMapOverride => "symbol_map_override",
             AuditKind::MarketView => "market_view",
             AuditKind::MarketPrepare => "market_prepare",
+            AuditKind::ClaudeUsage => "claude_usage",
+            AuditKind::NoteCaptured => "note_captured",
+            AuditKind::ModelBuilt => "model_built",
         }
     }
 }

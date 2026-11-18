@@ -114,6 +114,38 @@ pub fn app(state: AppState) -> Router {
         .route("/api/orders/{ticket}/cancel", post(cancel_order))
         .route("/api/killswitch", get(killswitch_get).post(killswitch_set))
         .route("/api/audit", get(audit_log))
+        .route("/api/egress", get(egress_log))
+        .route("/api/notes/graph", get(crate::notes_routes::graph))
+        .route("/api/notes/rescan", post(crate::notes_routes::rescan))
+        .route("/api/notes/{id}", get(crate::notes_routes::note))
+        .route("/api/notes/capture", post(crate::assistant_routes::capture))
+        .route("/api/models", get(crate::assistant_routes::models_list))
+        .route("/api/models/{id}", get(crate::assistant_routes::model_get))
+        .route(
+            "/api/models/{id}/file",
+            get(crate::assistant_routes::model_file),
+        )
+        .route(
+            "/api/models/{id}/info",
+            put(crate::assistant_routes::model_info),
+        )
+        // Uploads (spec-model-uploads): their own body limits, checked before the body is read.
+        .route(
+            "/api/models/upload",
+            post(crate::assistant_routes::upload).layer(DefaultBodyLimit::max(
+                crate::models3d::MAX_FILE_BYTES + 1024,
+            )),
+        )
+        .route(
+            "/api/models/relief",
+            post(crate::assistant_routes::relief).layer(DefaultBodyLimit::max(
+                crate::models3d::MAX_IMAGE_BYTES + 1024,
+            )),
+        )
+        .route(
+            "/api/assistant/status",
+            get(crate::assistant_routes::status),
+        )
         .route("/api/auth/logout", post(auth_http::logout))
         .route("/api/auth/me", get(auth_http::me))
         .layer(short);
@@ -124,6 +156,15 @@ pub fn app(state: AppState) -> Router {
     let slow = Router::new()
         .route("/api/chat", post(chat).layer(budget(Budget::Chat)))
         .route("/api/confirm/{token}", post(confirm))
+        // Claude builds from a picture: as slow as a chat turn, with the chat budget.
+        .route(
+            "/api/models/from-image",
+            post(crate::assistant_routes::from_image)
+                .layer(DefaultBodyLimit::max(
+                    crate::models3d::MAX_IMAGE_BYTES + 1024,
+                ))
+                .layer(budget(Budget::Chat)),
+        )
         // A view reads a handful of bars, the calendar and news before it answers, so it has
         // the long timeout and its own budget.
         .route(
@@ -687,6 +728,17 @@ struct ChatRequestBody {
     /// The message was spoken: previews get the after-read-back confirm window.
     #[serde(default)]
     voice: bool,
+    /// `"trading"` (default) or `"assistant"` (spec-assistant-mode).
+    #[serde(default)]
+    mode: Option<String>,
+    /// Assistant mode: the model on the user's screen, `{id}` (spec-model-uploads).
+    #[serde(default)]
+    stage_model: Option<StageModelBody>,
+}
+
+#[derive(Deserialize)]
+struct StageModelBody {
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -697,6 +749,18 @@ struct ChatResponseBody {
     persona: String,
     tool_calls: Vec<ToolCallSummary>,
     preview: Option<PreviewDto>,
+    /// The notes the reply drew on, `{id, title}` (ids as in `/api/notes/graph`).
+    notes: Vec<crate::agent::CitedNote>,
+    /// `"trading"` or `"assistant"`.
+    mode: &'static str,
+    /// The model that answered: `{provider, model}`.
+    brain: Value,
+    /// 3D models built in this turn (Assistant mode).
+    models: Vec<crate::assistant::ModelRef>,
+    /// Notes written in this turn by "remember that ..." (Assistant mode).
+    captured: Vec<jarvis_notes::Captured>,
+    /// This month's Claude spending (Assistant mode).
+    spend: Option<crate::spend::SpendStatus>,
 }
 
 async fn chat(
@@ -729,6 +793,18 @@ async fn chat(
                 .map_err(|_| ApiError::BadRequest("session_id is not a valid UUID".to_owned()))?,
         ),
     };
+    match req.mode.as_deref().map(str::trim).unwrap_or("trading") {
+        "" | "trading" => {}
+        "assistant" => {
+            let stage = req.stage_model.map(|s| s.id);
+            return assistant_chat(&state, session_id, message, req.voice, stage).await;
+        }
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown mode '{other}' (use \"trading\" or \"assistant\")"
+            )));
+        }
+    }
     let settings = state.user_settings(session.as_ref()).await;
     let explicit = req
         .provider
@@ -791,6 +867,102 @@ async fn chat(
         persona: outcome.persona,
         tool_calls: outcome.tool_calls,
         preview: outcome.preview,
+        notes: outcome.notes,
+        mode: "trading",
+        brain: json!({ "provider": provider_name, "model": provider.model() }),
+        models: vec![],
+        captured: vec![],
+        spend: None,
+    }))
+}
+
+/// `POST /api/chat` with `mode: "assistant"`: the Assistant mode loop, which has no MT5 tools.
+async fn assistant_chat(
+    state: &AppState,
+    session_id: Option<Uuid>,
+    message: &str,
+    voice: bool,
+    stage_id: Option<String>,
+) -> Result<Json<ChatResponseBody>, ApiError> {
+    let assistant = state.assistant().ok_or_else(|| {
+        ApiError::BadRequest("Assistant mode is turned off ([assistant] enabled = false)".into())
+    })?;
+    let config = &state.config().assistant;
+    let model = state
+        .provider(&config.provider)
+        .map(|e| e.config.model.clone());
+    let brain = json!({ "provider": config.provider, "model": model });
+    let reply_only = |reply: String| ChatResponseBody {
+        session_id: session_id.unwrap_or_else(Uuid::new_v4),
+        reply,
+        provider: config.provider.clone(),
+        persona: crate::assistant::ASSISTANT_PERSONA.to_owned(),
+        tool_calls: vec![],
+        preview: None,
+        notes: vec![],
+        mode: "assistant",
+        brain: brain.clone(),
+        models: vec![],
+        captured: vec![],
+        spend: Some(assistant.spend().status(chrono::Utc::now())),
+    };
+    // Without a usable provider nothing is sent anywhere; the reply says how to set it up.
+    let provider = match state.assistant_provider() {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(Json(reply_only(format!(
+                "Assistant mode needs Claude, and it is not set up yet ({reason}). Set \
+                 ANTHROPIC_API_KEY in the server's environment or .env file, then restart Arc MT."
+            ))));
+        }
+    };
+    // A task of its own, so the turn (and its spending record) finishes even if this request
+    // is dropped by the time limit or a closed connection.
+    // The model on screen, looked up here: its title and kind come from the store, not the client.
+    let on_screen = match stage_id.filter(|id| crate::models3d::valid_id(id)) {
+        None => None,
+        Some(id) => {
+            let store = assistant.models().clone();
+            tokio::task::spawn_blocking(move || store.get(&id))
+                .await
+                .ok()
+                .flatten()
+                .map(|m| crate::assistant::OnScreen {
+                    id: m.id,
+                    title: m.title,
+                    kind: m.kind,
+                })
+        }
+    };
+    let turn = {
+        let assistant = assistant.clone();
+        let message = message.to_owned();
+        tokio::spawn(async move {
+            assistant
+                .run_turn_on_screen(provider.as_ref(), session_id, &message, voice, on_screen)
+                .await
+        })
+    };
+    let outcome = match turn.await.map_err(|_| ApiError::Internal)? {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(provider = %config.provider, "assistant LLM call failed: {e}");
+            return Err(e.into());
+        }
+    };
+    Ok(Json(ChatResponseBody {
+        session_id: outcome.session_id,
+        reply: outcome.reply,
+        provider: config.provider.clone(),
+        persona: crate::assistant::ASSISTANT_PERSONA.to_owned(),
+        tool_calls: outcome.tool_calls,
+        preview: None,
+        notes: outcome.notes,
+        mode: "assistant",
+        brain,
+        models: outcome.models,
+        captured: outcome.captured,
+        spend: Some(outcome.spend),
     }))
 }
 
@@ -1019,6 +1191,28 @@ async fn killswitch_set(
         state.trading().release_kill_switch().await
     };
     Ok(Json(new_state))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/egress
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct EgressQuery {
+    #[serde(default)]
+    since: Option<u64>,
+}
+
+/// Outbound requests to other services, oldest first: the last 200, or those after `since`.
+/// `non_loopback` lists the hosts that are not this machine.
+async fn egress_log(State(state): State<AppState>, Query(q): Query<EgressQuery>) -> Json<Value> {
+    let log = state.egress();
+    let entries = log.since(q.since.unwrap_or(0));
+    Json(json!({
+        "entries": entries,
+        "non_loopback": crate::egress::non_loopback_hosts(&entries),
+        "last_seq": log.last_seq(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@
 	import { persona } from '#lib/state/persona.svelte.ts';
 	import HandsFreeBar from './HandsFreeBar.svelte';
 	import MicButton from './MicButton.svelte';
+	import UploadButton from './UploadButton.svelte';
+	import { mode } from '#lib/state/mode.svelte.ts';
 
 	let text = $state('');
 	let input = $state<HTMLTextAreaElement>();
@@ -89,6 +91,9 @@
 			{/if}
 		</div>
 
+		{#if mode.assistant}
+			<UploadButton />
+		{/if}
 		<MicButton />
 
 		<button

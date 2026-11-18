@@ -205,7 +205,9 @@ Where to get a free key, what the cache and the free-plan limits mean, and how t
 | `base_url` | URL | `http://127.0.0.1:11434` (Ollama), `https://api.anthropic.com` (Anthropic), `https://api.openai.com/v1` (OpenAI) | Override the endpoint. |
 | `api_key_env` | env var name | unset | Name of the environment variable that holds the key, for example `"ANTHROPIC_API_KEY"`. Required for `anthropic` and `openai`; ignored for `ollama`. The key itself never goes in the TOML file. A missing variable makes that provider unavailable. |
 | `timeout_secs` | integer | `60` | Per-request timeout for the provider. The example sets `180` for Ollama, because the first reply after a cold start loads the model. |
-| `max_tokens` | integer | `1024` | Upper bound on the reply length. |
+| `max_tokens` | integer | `1024` | Upper bound on the reply length. An Ollama reply that comes back empty because it hit this limit is retried once with twice the limit (at most 4096). |
+| `keep_alive` | Ollama duration | `"30m"` | Ollama only: how long the model stays loaded after a request (`"2h"`, `"-1"` for always). Ignored by the other kinds. |
+| `llm.warm_up` | boolean | `true` | At start-up, load the default model in the background when it is an Ollama provider, so the first question does not wait for it. Start-up never waits, and a failure is only a warning. Cloud providers are never warmed up. |
 
 Privacy: messages you type and the MT5 data the tools return (prices, positions, deals) are sent to the
 provider. A cloud provider sends them off the PC. Ollama keeps them local. The model never receives login,
@@ -261,11 +263,63 @@ The whole section is optional. Without it, voice is off. If the section is prese
 | `piper_exe` | path | required when enabled | Piper executable, for example `models/piper/piper.exe`. |
 | `piper_voice` | path | required when enabled | Piper voice model, for example `models/piper/en_US-lessac-medium.onnx`. |
 | `max_seconds` | number greater than 0, at most 120 | `30` | Longest recording accepted for transcription. |
+| `tts_engine` | `"piper"` or `"voicestudio"` | `"piper"` | Who speaks. `voicestudio` uses a local VoiceStudio app with a cloned voice, and each persona falls back to its Piper voice. |
+
+`[voice.voicestudio]` (used only with `tts_engine = "voicestudio"`; every key has a default):
+
+| Key | Default | Effect and safety |
+|---|---|---|
+| `url` | `"http://127.0.0.1:3900"` | Must be `http://` on this machine (`localhost`, `127.0.0.1` or `[::1]`); any other address makes the config invalid, so spoken text never leaves the PC. |
+| `engine` | `"mlx-audio"` | Engine VoiceStudio is told to use at start-up (pinned, so it never swaps in another one). |
+| `model_id` | `"mlx-community/csm-1b-8bit"` | Model of that engine. Check its licence. |
+| `language` | `"en"` | Language sent with each line. |
+| `keep_warm_minutes` | `10` | After this many idle minutes, render a short line and throw it away so the model stays loaded. `0` turns it off. |
+| `profiles` | empty | Table of persona id to VoiceStudio profile name. A persona without an entry uses the profile named after the persona. |
+
+Arc MT connects to VoiceStudio in the background and again at most every 30 seconds after a failure; meanwhile Piper speaks. See [local-mode.md](local-mode.md#optional-voicestudio-cloned-voice).
 
 A broken engine does not stop the server. Speech-to-text and text-to-speech are switched off separately, and
-the reason is written to the log. `GET /api/status` reports `voice.stt` and `voice.tts`.
+the reason is written to the log. `GET /api/status` reports `voice.stt`, `voice.tts`, `voice.tts_engine`, `voice.voicestudio_connected` and
+`voice.last_voice` (the voice that spoke the latest line).
 
 Each persona speaks with the voice named in its own pack (`voice_model`), see [Persona packs](#persona-packs).
+
+## `[notes]`
+
+Your markdown notes, shown on the galaxy page and searched by the `search_notes` tool. See
+[notes-galaxy.md](notes-galaxy.md).
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Off: the notes routes answer 404 and the model gets no `search_notes` tool. |
+| `dir` | path | `"notes"` | Folder of `.md` files, read only. Sub-folders become groups. Symbolic links and hidden folders are skipped; nothing outside the folder is read. A missing folder is not an error: the page says how to set one. |
+| `max_notes` | integer, at most 3000 | `2000` | Files beyond this many are skipped (the graph reports how many). The galaxy lays notes out in the browser, so the cap keeps it responsive. |
+| `max_file_kb` | integer | `256` | Larger files are skipped. |
+
+With a cloud language model, note excerpts that `search_notes` returns are sent to that provider as part of the
+conversation.
+
+## `[assistant]`
+
+Assistant mode: Jarvis the butler on Claude, with notes, "remember that ..." and 3D models. See
+[assistant-mode.md](assistant-mode.md) and [ADR-0022](adr/0022-assistant-mode.md).
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Off: the switch still shows, but Assistant turns answer `400` and the status says it is off. |
+| `provider` | string | `"claude"` | An `[[llm.providers]]` name. Its model answers every assistant turn. Unknown or without a key: the mode says so and sends nothing. |
+| `chat_effort` | `low` … `max` | `"low"` | Anthropic `output_config.effort` for chat turns. |
+| `build_effort` | `low` … `max` | `"medium"` | Effort for building 3D models. `high` gives more detail but, on Opus 5.5, took up to about 2.5 minutes a model. |
+| `monthly_budget_usd` | number | `20.0` | Nothing is sent to the provider once this month's counted cost reaches it. |
+| `price_input_per_mtok`, `price_output_per_mtok`, `price_cache_read_per_mtok`, `price_cache_write_per_mtok` | number | `4.0`, `20.0`, `0.2`, `5.0` | US dollars per million tokens (Claude Opus 5.5), used to count the cost. Update them if prices change. |
+| `models_dir` | path | `"data/models3d"` | Where built 3D models are kept (the newest 50). |
+| `spend_file` | path | `"data/assistant-spend.json"` | This month's counted cost. |
+| `max_model_kb` | integer, 1 to 1024 | `64` | Larger model code is refused. |
+| `captures_dir` | folder name | `"captures"` | The sub-folder of `[notes] dir` that "remember that ..." writes new notes to. One plain name; never a path. |
+
+The Claude provider entry for Assistant mode should set `model = "claude-opus-5-5"`, `timeout_secs = 240`
+(building a model can take two to three minutes), with `[server] long_request_timeout_secs = 300` and, optionally, `refusal_fallback = true`
+(a request Claude declines is re-run on another Claude model, billed at that model's rate).
 
 ## `[personas]`
 
@@ -352,6 +406,7 @@ suite (`cargo test --workspace`). Run the full set of checks with `pwsh scripts/
 
 ## Related docs
 
+- [Fully local mode](local-mode.md) for running with nothing leaving the PC, the preflight and the Wi-Fi-off drill.
 - [Windows service](windows-service.md) for the `service` commands and the log folder.
 - [Runbook](runbook.md) for day-to-day operation.
 - [VPS guide](vps.md) for the settings that matter on a server.

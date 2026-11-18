@@ -97,6 +97,12 @@ impl Article {
 pub trait NewsProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
+    /// Where this provider's requests go (for the outbound-connection log). `None` for a
+    /// provider that makes no network requests.
+    fn base_url(&self) -> Option<&str> {
+        None
+    }
+
     /// Recent headlines for the instrument, tone from the lexicon or the provider's own score.
     /// Not filtered for relevance.
     async fn fetch(&self, q: &NewsQuery) -> Result<Vec<Headline>, NewsError>;

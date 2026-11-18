@@ -128,3 +128,24 @@ test('the Market view panel fits at 375 px, with a card, the track record and th
 	expect(w.scroll).toBeLessThanOrEqual(w.client);
 	expect(w.body).toBeLessThanOrEqual(w.client);
 });
+
+// The one-row top bar needs about 1000 px with the bridge connected (latency, account pill,
+// LIVE badge), so narrower windows stack it and wider ones let the model picker give way.
+for (const width of [700, 830, 1024, 1100]) {
+	test.describe(`at ${width} px`, () => {
+		test.use({ viewport: { width, height: 800 }, hasTouch: false });
+
+		for (const mock of ['reset', 'live']) {
+			test(`the top bar fits with the bridge connected (mock=${mock})`, async ({ page }) => {
+				await page.goto(`/?mock=${mock}`);
+				await expect(page.getByRole('button', { name: /MT5 connected/ })).toBeVisible();
+				await expect(page.getByText(/(demo|real) acct/)).toBeVisible();
+				const w = await widths(page);
+				expect(w.scroll).toBeLessThanOrEqual(w.client);
+				expect(w.body).toBeLessThanOrEqual(w.client);
+				const select = await page.locator('#llm-provider').boundingBox();
+				expect(select!.x + select!.width).toBeLessThanOrEqual(width);
+			});
+		}
+	});
+}

@@ -1551,6 +1551,7 @@ dependencies = [
  "jarvis-llm",
  "jarvis-market",
  "jarvis-news",
+ "jarvis-notes",
  "jarvis-persona",
  "jarvis-symbols",
  "jarvis-voice",
@@ -1649,6 +1650,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jarvis-notes"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "jarvis-persona"
 version = "0.1.0"
 dependencies = [
@@ -1679,11 +1690,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hound",
+ "reqwest",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "whisper-rs",
+ "wiremock",
 ]
 
 [[package]]

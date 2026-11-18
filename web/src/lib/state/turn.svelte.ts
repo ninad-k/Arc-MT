@@ -28,7 +28,9 @@ export async function sendTurn(
 		const line = res.preview
 			? `${res.preview.description}. Say confirm, or cancel.`
 			: res.reply;
-		void speech.speak(line).finally(() => void preview.readbackDone());
+		// Assistant replies are always spoken by the assistant's persona (Jarvis).
+		const voice = res.mode === 'assistant' ? res.persona : undefined;
+		void speech.speak(line, voice).finally(() => void preview.readbackDone());
 	} else if (res.preview?.timing === 'after_readback') {
 		// Nothing will be read aloud, so the 15 s window must start now.
 		void preview.readbackDone();
