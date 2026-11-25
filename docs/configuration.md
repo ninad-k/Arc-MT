@@ -321,6 +321,28 @@ The Claude provider entry for Assistant mode should set `model = "claude-opus-5-
 (building a model can take two to three minutes), with `[server] long_request_timeout_secs = 300` and, optionally, `refusal_fallback = true`
 (a request Claude declines is re-run on another Claude model, billed at that model's rate).
 
+## `[desk]`
+
+Desk mode: Nimbus Desk, Friday and eight specialists. See [desk-mode.md](desk-mode.md) and
+[ADR-0023](adr/0023-nimbus-desk.md).
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Off: Desk turns answer `400` and `/api/desk/state` says it is off. |
+| `provider` | string | `"claude"` | An `[[llm.providers]]` name for Friday. Any kind works; only an Anthropic provider is metered. Unknown or without a key: the mode says so and sends nothing. |
+| `effort` | `low` … `max` | `"medium"` | Anthropic `output_config.effort` for Friday's turns. |
+| `monthly_budget_usd` | number | `20.0` | Desk mode's own cap: nothing is sent to Claude once this month's counted Desk cost reaches it. |
+| `price_*_per_mtok` | number | `4.0`, `20.0`, `0.2`, `5.0` | US dollars per million tokens (Claude Opus 5.5), used to count the cost. |
+| `spend_file` | path | `"data/desk-spend.json"` | This month's counted Desk cost. |
+| `universe` | list of symbols | `[]` | US stocks Scout scans with the watchlist (at most 50). Sentinel lets them trade only while the US market is open (so does any symbol the instrument catalog does not list as FX, metal, index, energy or crypto). |
+| `indices` | list of symbols | `["US500", "NAS100"]` | Index symbols for Atlas and the market pulse. A symbol the broker lacks shows "—". |
+| `risk_percent` | number, 0.01 to 5 | `0.5` | Sentinel: percent of equity at risk per trade. The gate's `max_risk_percent` still applies. |
+| `max_open_positions` | integer, 1 to 50 | `2` | Sentinel: open Desk positions at most (tickets of executed Pilot previews, rebuilt from the audit log at start). The gate's `max_positions` still applies. |
+| `no_new_trades_before_close_minutes` | integer, 0 to 390 | `10` | Sentinel vetoes new trades this close to the US close. |
+| `fomc_dates`, `holidays` | list of `YYYY-MM-DD` | `[]` | Days added to the built-in tables (FOMC 2026; NYSE holidays 2026 and 2027). A bad date fails start-up. |
+| `finnhub_key_env` | string | `"FINNHUB_API_KEY"` | The environment variable holding the Finnhub key for insiders, fundamentals and filings. |
+| `scout_top` | integer, 1 to 50 | `8` | Movers Scout reports. |
+
 ## `[personas]`
 
 | Key | Type | Default | Effect and safety |

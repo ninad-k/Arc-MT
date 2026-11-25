@@ -36,7 +36,7 @@ let startLimit = BUILD_LIMIT_MS;
 function post(msg: FromSandbox): void {
 	// The app's origin cannot be named from an opaque origin, so '*': the messages carry no
 	// secrets, and the app checks that they come from this frame.
-	parentWindow.postMessage(msg, '*');
+	parentWindow.postMessage(msg, '*'); // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
 }
 
 const canvas = document.createElement('canvas');
@@ -78,7 +78,9 @@ setInterval(() => {
 	}
 }, 500);
 
-window.addEventListener('message', (event: MessageEvent) => {
+// The sender is checked by identity (`event.source`), which is stricter than an origin check:
+// this opaque-origin frame cannot name the app's origin.
+window.addEventListener('message', (event: MessageEvent) => { // nosemgrep: javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation
 	if (event.source !== parentWindow || !worker) return;
 	const msg = event.data as ToSandbox | null;
 	if (!msg || typeof msg !== 'object') return;

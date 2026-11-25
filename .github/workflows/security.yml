@@ -190,10 +190,16 @@ jobs:
           sarif = json.load(open("semgrep.sarif", encoding="utf-8"))
           bad = []
           notes = 0
+          suppressed = 0
           for run in sarif["runs"]:
               levels = {r["id"]: r.get("defaultConfiguration", {}).get("level", "warning")
                         for r in run["tool"]["driver"].get("rules", [])}
               for res in run["results"]:
+                  # A reviewed `nosemgrep: <rule>` comment: semgrep keeps the result in the SARIF
+                  # but marks it suppressed. It still shows in code scanning; it does not block.
+                  if any(s.get("state", "accepted") == "accepted" for s in res.get("suppressions", [])):
+                      suppressed += 1
+                      continue
                   level = res.get("level") or levels.get(res["ruleId"], "warning")
                   loc = res["locations"][0]["physicalLocation"]
                   where = f'{loc["artifactLocation"]["uri"]}:{loc["region"]["startLine"]}'
@@ -201,7 +207,7 @@ jobs:
                       bad.append(f"{level}: {res['ruleId']} at {where}")
                   else:
                       notes += 1
-          print(f"{len(bad)} blocking result(s), {notes} note(s)")
+          print(f"{len(bad)} blocking result(s), {notes} note(s), {suppressed} suppressed in source")
           for line in bad:
               print(line)
           sys.exit(1 if bad else 0)

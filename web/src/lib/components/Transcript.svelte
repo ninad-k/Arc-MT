@@ -24,7 +24,15 @@
 		'What is my rule for gold on news days?',
 		'Remember that the finish window should be 900 ms'
 	];
-	const SUGGESTIONS = $derived(mode.assistant ? ASSISTANT_SUGGESTIONS : TRADING_SUGGESTIONS);
+	const DESK_SUGGESTIONS = [
+		"What's moving today?",
+		'Give me the full desk view on NVDA',
+		'Any insider buying in NVDA?',
+		'Size a long on NVDA with a stop at 118'
+	];
+	const SUGGESTIONS = $derived(
+		mode.assistant ? ASSISTANT_SUGGESTIONS : mode.desk ? DESK_SUGGESTIONS : TRADING_SUGGESTIONS
+	);
 
 	function onScroll() {
 		if (!scroller) return;
@@ -65,6 +73,12 @@
 					<p class="mt-1 text-xs text-mute">
 						Ask for a 3D model of anything, ask about your notes, or say "remember that ...". Runs on Claude;
 						no access to trading in this mode.
+					</p>
+				{:else if mode.desk}
+					<p class="text-sm text-ink">Ask {persona.name} and the desk.</p>
+					<p class="mt-1 text-xs text-mute">
+						Eight specialists research, chart and size; only Sentinel can approve a trade, and nothing executes
+						until you confirm it. Information, not financial advice.
 					</p>
 				{:else}
 					<p class="text-sm text-ink">Ask {persona.name} about your markets.</p>

@@ -10,6 +10,10 @@ import { toasts } from './toasts.svelte';
 const CACHE_KEY = 'arcmt.persona';
 /** Assistant mode always speaks as this persona (spec-assistant-mode). */
 export const ASSISTANT_PERSONA = 'jarvis';
+/** Desk mode's master is always Friday (spec-nimbus-desk). */
+export const DESK_PERSONA = 'friday';
+/** Friday's colours (personas/friday.toml), used in Desk mode until the persona list arrives. */
+const FRIDAY_THEME = { accent: '#f5b942', accent_soft: '#5c3d0a', orb_core: '#fcd77f', orb_glow: '#f59e0b' };
 
 interface Cached {
 	id: string;
@@ -79,19 +83,23 @@ class PersonaStore {
 		return this.list.find((p) => p.id === id) ?? null;
 	}
 
-	/** The persona on screen: always Jarvis in Assistant mode, else the active one. */
+	/** The persona on screen: always Jarvis in Assistant mode, Friday in Desk mode, else the active one. */
 	get shown(): Persona | null {
 		if (mode.assistant) return this.list.find((p) => p.id === ASSISTANT_PERSONA) ?? this.current;
+		if (mode.desk) return this.list.find((p) => p.id === DESK_PERSONA) ?? this.current;
 		return this.current;
 	}
 
 	/** Id of the persona on screen (see `shown`). */
 	get shownId(): string | null {
-		return mode.assistant ? ASSISTANT_PERSONA : this.activeId;
+		if (mode.assistant) return ASSISTANT_PERSONA;
+		if (mode.desk) return DESK_PERSONA;
+		return this.activeId;
 	}
 
 	get name(): string {
 		if (mode.assistant) return this.shown?.name ?? 'Jarvis';
+		if (mode.desk) return this.shown?.name ?? 'Friday';
 		return this.current?.name ?? status.data?.persona?.name ?? this.cached?.name ?? DEFAULT_PERSONA_NAME;
 	}
 
@@ -101,6 +109,7 @@ class PersonaStore {
 	}
 
 	get theme() {
+		if (mode.desk && this.shown?.id !== DESK_PERSONA) return FRIDAY_THEME;
 		return this.shown?.theme ?? (this.cached ? this.cached.theme : DEFAULT_THEME);
 	}
 

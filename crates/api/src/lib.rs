@@ -16,6 +16,8 @@ pub mod broker;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod desk;
+pub mod desk_routes;
 pub mod egress;
 pub mod events;
 pub mod grounding;

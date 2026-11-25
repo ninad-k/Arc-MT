@@ -1,6 +1,7 @@
 import type { WsEvent } from '#lib/api.ts';
 import { reconnectDelay } from '#lib/backoff.ts';
 import { alerts } from './alerts.svelte';
+import { desk } from './desk.svelte';
 import { killSwitch } from './killswitch.svelte';
 import { refreshTrading, status, watchlist } from './hud.svelte';
 import { preview } from './preview.svelte';
@@ -111,6 +112,10 @@ class EventsStore {
 			case 'trade_executed':
 			case 'positions_changed':
 				refreshTrading();
+				if (e.type === 'trade_executed') desk.onTradeExecuted();
+				break;
+			case 'desk_activity':
+				desk.onActivity(e);
 				break;
 		}
 	}

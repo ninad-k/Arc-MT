@@ -1,0 +1,15 @@
+[package]
+name = "jarvis-desk"
+version = "0.1.0"
+description = "Nimbus Desk: the nine desk agents, the US session clock and the desk calendar (pure)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+jarvis-market = { version = "0.1.0", path = "../market" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"

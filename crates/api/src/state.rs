@@ -66,6 +66,8 @@ pub struct Overrides {
     pub personas: Option<PersonaRegistry>,
     /// The news service (default: built from `[market.news]`).
     pub news: Option<NewsService>,
+    /// Desk mode's Finnhub client (default: from the key in `[desk] finnhub_key_env`).
+    pub finnhub: Option<jarvis_news::FinnhubData>,
 }
 
 /// A configured LLM provider that is either ready or missing something (usually an API key).
@@ -271,6 +273,7 @@ struct Inner {
     notes: Option<Arc<jarvis_notes::NotesService>>,
     /// Assistant mode; `None` when `[assistant] enabled = false`.
     assistant: Option<Arc<crate::assistant::Assistant>>,
+    desk: Option<Arc<crate::desk::Desk>>,
 }
 
 /// The window of the per-session request budgets.
@@ -372,7 +375,7 @@ impl AppState {
             limits: config.effective_limits(),
             config: config.trading.clone(),
             kill_switch: KillSwitch::new(config.trading.kill_switch_engaged),
-            time,
+            time: time.clone(),
             events: events.clone(),
             broker: broker.clone(),
         });
@@ -428,6 +431,33 @@ impl AppState {
                 },
             ))
         });
+        // Desk mode: Friday and the eight specialists (spec-nimbus-desk). Its own spend meter.
+        let desk = config.desk.enabled.then(|| {
+            let d = &config.desk;
+            let finnhub = overrides.finnhub.or_else(|| {
+                std::env::var(&d.finnhub_key_env)
+                    .ok()
+                    .and_then(|key| jarvis_news::FinnhubData::new(key).ok())
+            });
+            let desk = Arc::new(crate::desk::Desk::new(crate::desk::DeskParts {
+                config: d.clone(),
+                audit: audit.clone(),
+                bridge: bridge.clone(),
+                market: market.clone(),
+                trading: trading.clone(),
+                finnhub,
+                egress: egress.clone(),
+                spend: Arc::new(crate::spend::SpendMeter::new(
+                    Some(d.spend_file.clone()),
+                    d.monthly_budget_usd,
+                    d.prices(),
+                )),
+                events: events.clone(),
+                time: time.clone(),
+            }));
+            desk.follow_trades();
+            desk
+        });
         Self(Arc::new(Inner {
             config,
             bridge,
@@ -454,6 +484,7 @@ impl AppState {
             egress,
             notes,
             assistant,
+            desk,
         }))
     }
 
@@ -625,6 +656,24 @@ impl AppState {
             "enabled": self.0.config.auth.enabled,
             "username": session.map(|s| s.username.as_str()),
         })
+    }
+    /// Desk mode, when `[desk]` is on.
+    pub fn desk(&self) -> Option<&Arc<crate::desk::Desk>> {
+        self.0.desk.as_ref()
+    }
+    /// The provider Friday answers on, and whether it is billed (Claude, so the Desk cap applies).
+    pub fn desk_provider(&self) -> Result<(Arc<dyn jarvis_llm::LlmProvider>, bool), String> {
+        let name = &self.0.config.desk.provider;
+        let entry = self
+            .provider(name)
+            .ok_or_else(|| format!("no [[llm.providers]] entry named '{name}'"))?;
+        match &entry.slot {
+            ProviderSlot::Available(p) => Ok((
+                p.clone(),
+                entry.config.kind == jarvis_llm::ProviderKind::Anthropic,
+            )),
+            ProviderSlot::Unavailable(reason) => Err(format!("provider '{name}': {reason}")),
+        }
     }
     /// The user's notes, when `[notes]` is on.
     pub fn notes(&self) -> Option<&Arc<jarvis_notes::NotesService>> {

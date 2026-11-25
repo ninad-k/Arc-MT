@@ -16,6 +16,8 @@
  *   ?mock=ttl=4         confirmation window of 4 s instead of 15 s
  *   ?mock=reset         forget the remembered switches
  *
+ * Desk mode (`?mode=desk`): see `mock-desk.ts` for the scripted Friday ("what's moving", "desk view on gold",
+ * "size a long on gold with a stop at 2380", "buy gold with a stop at 2380").
  * Market view: `?mock=viewttl=5` makes a view valid for 5 s instead of 4 h (shows the expired state).
  *
  * Chat: "close gold", "close all", "close buys", "close half of gold", "buy 0.1 gold sl 2300",
@@ -102,6 +104,7 @@ import {
 	putInfo,
 	upload
 } from './mock-assistant';
+import { deskChat, deskPilot, deskPulse, deskState } from './mock-desk';
 
 export { onMockEvent };
 
@@ -556,7 +559,13 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		if (!req?.message || req.message.length > 2000)
 			throw new ApiError('bad_request', 'message must be 1-2000 characters', 400);
 		await sleep(900, opts.signal);
-		return (req.mode === 'assistant' ? assistantChat(req) : chat(req)) as T;
+		return (req.mode === 'assistant' ? assistantChat(req) : req.mode === 'desk' ? deskChat(req) : chat(req)) as T;
+	}
+	if (path === '/api/desk/state') return deskState() as T;
+	if (path === '/api/desk/pulse') return deskPulse() as T;
+	{
+		const pm = path.match(/^\/api\/desk\/plans\/([^/]+)\/pilot$/);
+		if (pm) return deskPilot(decodeURIComponent(pm[1])) as T;
 	}
 	if (path === '/api/assistant/status') return assistantStatus() as T;
 	if (path === '/api/models') return listModels() as T;

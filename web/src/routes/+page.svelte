@@ -27,6 +27,7 @@
 	import { mode } from '#lib/state/mode.svelte.ts';
 	import { assistant } from '#lib/state/assistant.svelte.ts';
 	import ModelStage from '#lib/components/ModelStage.svelte';
+	import DeskMain from '#lib/components/desk/DeskMain.svelte';
 	import ImageUploadSheet from '#lib/components/ImageUploadSheet.svelte';
 	import { uploads } from '#lib/state/uploads.svelte.ts';
 
@@ -135,7 +136,7 @@
 			{#if chat.sessionId}
 				<span title="Session {chat.sessionId}">session {chat.sessionId.slice(0, 8)}</span>
 			{/if}
-			{#if !mode.assistant}
+			{#if !mode.assistant && !mode.desk}
 				<button
 					type="button"
 					class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink max-lg:hidden"
@@ -171,7 +172,10 @@
 <div class="flex h-dvh flex-col">
 	<TopBar />
 
-	{#if mode.assistant}
+	{#if mode.desk}
+		<!-- Desk mode (spec-nimbus-desk): Friday and the eight specialists around the orb. -->
+		<DeskMain chat={chatPanel} />
+	{:else if mode.assistant}
 		<!-- Assistant mode: the stage (the orb, or the 3D model on screen) and the chat. No MT5 panels. -->
 		<main
 			class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(12rem,1.1fr)_minmax(0,1fr)] gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:grid-cols-[minmax(0,1.5fr)_minmax(22rem,1fr)] lg:grid-rows-1 lg:gap-4"

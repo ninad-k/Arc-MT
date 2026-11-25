@@ -49,6 +49,13 @@ Marked **(local)** when the feature runs entirely on your PC, with no cloud serv
 - **Limits and kill switch (local):** `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours, and a kill switch that blocks writes.
 - **Login (local):** password (Argon2id) with an authenticator code (TOTP), a session cookie, rate limits and lockout. Users are created on the machine itself.
 - **Two modes:** switch between **Trading** (Jarvis or Friday on MT5) and **Assistant** (Jarvis the butler on Claude) in the top bar. The assistant builds a 3D model of anything you ask for ("show me a jet engine"), answers from your notes and saves new ones ("remember that ..."). It has no access to trading, its 3D code runs sealed off in a sandbox, and a monthly cap limits what Claude costs. See [docs/assistant-mode.md](docs/assistant-mode.md).
+- **Desk mode (Nimbus Desk; Claude by default, or a local model):** a third mode with Friday as the master and eight
+  specialists: Atlas (macro), Capitol (insiders), Scout (movers), Athena (fundamentals and structure), Chartist
+  (draws the desk chart), Oracle (probabilities from past returns), Sentinel (sizes and approves or vetoes),
+  Pilot (prepares the preview) and Ledger (the journal). The HUD has nine seats around the orb, a market pulse,
+  a signal log, the US session clock and an FOMC and options-expiry calendar. Money moves only through Sentinel,
+  Pilot and your usual confirmation. Its own monthly Claude cap. See [docs/desk-mode.md](docs/desk-mode.md) and
+  [ADR-0023](docs/adr/0023-nimbus-desk.md).
 - **Notes galaxy (local):** your markdown notes as a 3D galaxy, coloured by folder and linked by `[[wikilinks]]`. Ask "what is my rule for gold on news days?" and the assistant answers from your notes, names the note, and the camera flies to it. Read only. See [docs/notes-galaxy.md](docs/notes-galaxy.md) and [ADR-0021](docs/adr/0021-notes-galaxy.md).
 - **Fully local mode and preflight (local):** `jarvis-api preflight` checks every live chain with real calls (model, voice out, voice in, private files, the web bundle, outbound connections) and prints your machine's latency budget. Every outbound request is logged with its host, so you can prove nothing left the PC. See [docs/local-mode.md](docs/local-mode.md) and [ADR-0020](docs/adr/0020-fully-local-mode.md).
 - **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper, with one Piper voice per persona. Long replies are read in full, sentence by sentence, without gaps. Optional cloned voice through a local VoiceStudio app. Confirmations are read back aloud, and the 15-second window starts when reading finishes. Optional hands-free wake-word mode listens for a persona's wake phrase.

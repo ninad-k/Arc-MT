@@ -31,6 +31,7 @@ pnpm icons             # regenerate static/icons/*.png (only when the artwork ch
 | PWA: manifest, icons, service worker, offline page | `static/manifest.webmanifest`, `static/icons`, `static/offline.html`, `src/service-worker` |
 | Personas: toggle in the top bar, name in the UI, theme as CSS custom properties, orb colours | `lib/components/PersonaToggle.svelte`, `lib/state/persona.svelte.ts`, `lib/theme.ts`, `routes/layout.css`, `lib/orb/OrbScene.ts` |
 | Settings page (`/settings`): persona, voice, model, watchlist, aliases, tighten-only limits, unsaved-changes guard | `routes/settings`, `lib/components/settings/*`, `lib/state/settings.svelte.ts`, `lib/settings-rules.ts` |
+| Desk mode (Nimbus Desk): seat ring, market pulse, task queue, signal log, session clock, calendar, agent load, chart, plan cards, journal | `lib/components/desk/*`, `lib/state/desk.svelte.ts`, `lib/desk/*`, `lib/mock-desk.ts` |
 | Hands-free (wake word): in-browser voice detector, segment upload, routing | `lib/voice/vad-core.js` (AudioWorklet), `lib/voice/listener.ts`, `lib/voice/wake.ts`, `lib/state/handsfree.svelte.ts`, `lib/components/HandsFreeBar.svelte` |
 
 ## Safety rules the UI keeps

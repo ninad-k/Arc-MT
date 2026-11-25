@@ -49,6 +49,12 @@ impl ScriptedLlm {
         })
     }
 
+    /// Add a response to the end of the script (for responses that need ids made during the test).
+    #[allow(dead_code)]
+    pub fn push(&self, response: ChatResponse) {
+        self.script.lock().unwrap().push_back(Ok(response));
+    }
+
     /// A model that takes `delay` to answer, then says "late".
     pub fn slow(name: &str, delay: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -294,6 +300,11 @@ pub struct Options<'a> {
     /// Extra lines for the `[assistant]` table (its models and spend files always go to a
     /// fresh temp folder, `TestApp::assistant_dir`).
     pub assistant: &'a str,
+    /// Extra lines for the `[desk]` table (its spend file goes to `TestApp::assistant_dir`, and
+    /// no Finnhub key is read from the environment).
+    pub desk: &'a str,
+    /// Desk mode's Finnhub client (default: none).
+    pub finnhub: Option<jarvis_news::FinnhubData>,
 }
 
 impl Default for Options<'_> {
@@ -318,6 +329,8 @@ impl Default for Options<'_> {
             news: None,
             notes: None,
             assistant: "",
+            desk: "",
+            finnhub: None,
         }
     }
 }
@@ -419,6 +432,16 @@ auto_detect = {}
         assistant_dir.join("spend.json").display(),
         opts.assistant
     ));
+    toml.push_str(&format!(
+        "
+[desk]
+spend_file = '{}'
+finnhub_key_env = 'JARVIS_TEST_NO_FINNHUB_KEY'
+{}
+",
+        assistant_dir.join("desk-spend.json").display(),
+        opts.desk
+    ));
     let config = Config::from_toml_str(&toml).expect("test config");
     let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
@@ -462,6 +485,7 @@ auto_detect = {}
         voice: opts.voice,
         personas: Some(opts.personas.unwrap_or_else(real_personas)),
         news: Some(opts.news.unwrap_or_else(jarvis_news::NewsService::disabled)),
+        finnhub: opts.finnhub,
     };
     let state = AppState::new_with(config, bridge, audit.clone(), slots, overrides);
     TestApp {

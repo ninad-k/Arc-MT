@@ -314,6 +314,13 @@ async fn proposals_and_refusals_are_unaffected() {
 /// Everything the user and the audit trail see for one persona, without ids and times.
 async fn run_for(persona: &str, script: Vec<Value>) -> Value {
     let mock = MockBridge::start().await;
+    // The two runs being compared start their mocks in different seconds; a fixed price time
+    // keeps the tool results (which the comparison includes) identical.
+    mock.update_state(|s| {
+        for p in &mut s.prices {
+            p.time = 1_795_000_000;
+        }
+    });
     let responses = script
         .into_iter()
         .map(|step| match step["tool"].as_str() {

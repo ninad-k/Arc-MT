@@ -27,6 +27,11 @@ ignore = [
     # database (`[database] url`, default `data/jarvis.db`), which it creates itself; an attacker
     # who can plant files in that folder can already rewrite the database. Review by 2027-01-31,
     # and remove as soon as an sqlx release allows libsqlite3-sys >= 0.39.
+    # chrono is reported unmaintained (no vulnerability). It is the date type of every crate
+    # here (audit timestamps, the bridge clock, market views, the desk session clock) and has
+    # no drop-in replacement; moving to another date library is its own change. Review by
+    # 2027-01-31.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not vulnerable; used for dates in every crate, no drop-in replacement yet; review by 2027-01-31" },
     { id = "RUSTSEC-2026-0459", reason = "local-only, needs write access to our own data folder; no sqlx release can use the fixed libsqlite3-sys yet; review by 2027-01-31" },
 ]
 
