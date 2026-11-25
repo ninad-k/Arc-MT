@@ -76,10 +76,14 @@ test('saving a review works and a bad one shows the server error', async ({ page
 	await expect(form.getByTestId('review-saved')).toBeVisible();
 	await expect(row(page, 'NVDA')).toContainText('Momentum continuation');
 
-	await form.getByTestId('review-notes').fill('x'.repeat(4001).slice(0, 4000));
-	await form.getByRole('button', { name: 'Add a mistake tag' }).fill('y'.repeat(70));
+	// Eleven mistake tags: the server allows ten, so the save is refused and the reason shown.
+	const addMistake = form.getByRole('textbox', { name: 'Add a mistake tag' });
+	for (let i = 1; i <= 11; i++) {
+		await addMistake.fill(`mistake ${i}`);
+		await addMistake.press('Enter');
+	}
 	await form.getByTestId('review-save').click();
-	await expect(form.getByTestId('review-error')).toBeVisible();
+	await expect(form.getByTestId('review-error')).toContainText('10 mistake tags');
 });
 
 test('Scan now adds a waiting decision, and Ask Friday goes to the usual confirmation', async ({ page }) => {

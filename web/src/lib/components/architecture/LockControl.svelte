@@ -61,12 +61,12 @@
 	{:else if !view}
 		<div class="skeleton h-20" aria-busy="true" aria-label="Loading the account lock"></div>
 	{:else}
-		<section class="border border-line bg-deck p-3">
+		<div class="border border-line bg-deck p-3">
 			<h3 class="hud-title mb-1.5">Status</h3>
 			<p class="text-base {toneCls[lockTone(view.state)]}" data-testid="lock-state">{icon[view.state]} {view.state}</p>
 			<p class="mt-1 text-mute" data-testid="lock-message">{view.message}</p>
-		</section>
-		<section class="border border-line bg-deck p-3">
+		</div>
+		<div class="border border-line bg-deck p-3">
 			<h3 class="hud-title mb-1.5">Expected account</h3>
 			<dl class="num grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1">
 				<dt class="text-faint">Broker</dt>
@@ -79,7 +79,7 @@
 					</button>
 				</dd>
 			</dl>
-		</section>
+		</div>
 	{/if}
 
 	<form class="grid gap-2 border border-line bg-deck p-3" onsubmit={save}>
