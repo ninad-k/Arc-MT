@@ -14,7 +14,7 @@
 		"icons": "node scripts/make-icon.mjs && tauri icon assets/icon-source.png"
 	},
 	"devDependencies": {
-		"@tauri-apps/cli": "2.12.4",
+		"@tauri-apps/cli": "2.12.5",
 		"sharp": "0.35.5"
 	},
 	"engines": {
