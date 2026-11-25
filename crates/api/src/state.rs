@@ -267,6 +267,9 @@ struct Inner {
     chat_limiter: RateLimiter,
     transcribe_limiter: RateLimiter,
     market_limiter: RateLimiter,
+    api_limiter: RateLimiter,
+    /// One `request_refused` audit row per reason and caller per window (AUD-1).
+    refusal_audit_limiter: RateLimiter,
     /// Market views, the calendar and news; `None` when `[market] enabled = false`.
     market: Option<Arc<MarketService>>,
     /// Every outbound request to another service (FL-3).
@@ -284,12 +287,25 @@ struct Inner {
 /// The window of the per-session request budgets.
 const REQUEST_RATE_WINDOW_MS: i64 = 60_000;
 
-/// Which expensive route a request budget is for.
+/// Which expensive route a request budget is for. `Api` is the budget every session route
+/// shares (NET-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Budget {
     Chat,
     Transcribe,
     Market,
+    Api,
+}
+
+impl Budget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Budget::Chat => "chat",
+            Budget::Transcribe => "transcribe",
+            Budget::Market => "market",
+            Budget::Api => "api",
+        }
+    }
 }
 
 /// Cheap to clone; shared by every request handler.
@@ -366,6 +382,7 @@ impl AppState {
             })
             .collect();
         let clock = ServerClock::default();
+        let api_per_minute = config.server.api_rate_limit_per_minute;
         let (chat_per_minute, transcribe_per_minute) = (
             config.server.chat_rate_limit_per_minute,
             config.server.transcribe_rate_limit_per_minute,
@@ -513,6 +530,8 @@ impl AppState {
             chat_limiter: RateLimiter::new(chat_per_minute, REQUEST_RATE_WINDOW_MS),
             transcribe_limiter: RateLimiter::new(transcribe_per_minute, REQUEST_RATE_WINDOW_MS),
             market_limiter: RateLimiter::new(market_per_minute, REQUEST_RATE_WINDOW_MS),
+            api_limiter: RateLimiter::new(api_per_minute, REQUEST_RATE_WINDOW_MS),
+            refusal_audit_limiter: RateLimiter::new(1, REQUEST_RATE_WINDOW_MS),
             market,
             egress,
             notes,
@@ -962,7 +981,29 @@ impl AppState {
             Budget::Chat => self.0.chat_limiter.check(key, now),
             Budget::Transcribe => self.0.transcribe_limiter.check(key, now),
             Budget::Market => self.0.market_limiter.check(key, now),
+            Budget::Api => self.0.api_limiter.check(key, now),
         }
+    }
+
+    /// Audit a refused request (AUD-1): at most one row per `reason` and `caller` per minute,
+    /// so a flood of refusals cannot flood the audit table. `details` must not hold secrets
+    /// (pass paths through `routes::redact_path`).
+    pub async fn audit_refusal(&self, reason: &str, caller: &str, mut details: Value) {
+        let now = self.0.trading.now_ms();
+        if self
+            .0
+            .refusal_audit_limiter
+            .check(&format!("{reason}|{caller}"), now)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(map) = details.as_object_mut() {
+            map.insert("reason".to_owned(), Value::from(reason));
+        }
+        self.audit()
+            .record(None, crate::audit::AuditKind::RequestRefused, details)
+            .await;
     }
 
     pub fn providers(&self) -> &[ProviderEntry] {
@@ -1022,6 +1063,8 @@ impl AppState {
                 state.0.chat_limiter.purge(now);
                 state.0.transcribe_limiter.purge(now);
                 state.0.market_limiter.purge(now);
+                state.0.api_limiter.purge(now);
+                state.0.refusal_audit_limiter.purge(now);
                 if let Some(auth) = &auth {
                     auth.purge().await;
                 }

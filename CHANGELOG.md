@@ -10,6 +10,15 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Added
 
+- Security hardening from the 2026-11-25 guide check ([docs/security/guide-check-2026-11-25.md](docs/security/guide-check-2026-11-25.md)):
+  - every route that needs a session shares one request budget per session, `[server] api_rate_limit_per_minute`
+    (default 600, 60 to 100000), on top of the chat, transcription and market budgets (NET-3);
+  - audit rows written for a request carry the client's address as `ip`; a changed setting writes a
+    `settings_changed` row; a request refused for a foreign `Origin`, a non-loopback `Host` or a used-up budget
+    writes a `request_refused` row, at most one per reason and caller per minute (AUD-1);
+  - the web UI shows a plain error screen (`+error.svelte`) instead of a blank page when a screen fails to load or
+    throws, and logs the error with its route (`hooks.client.ts`).
+
 - The architecture page (ADR-0025, `/architecture`). It shows each Desk decision from the signals through six
   members' opinions, the council and Friday's exact prompt to execution, or says why there was no trade (one
   stop code per decision). It has:

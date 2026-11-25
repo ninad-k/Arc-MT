@@ -58,6 +58,7 @@ Safety: keep `demo` for every test. Do not change `mode` to get past a `mode_mis
 | `max_connections` | integer 1 to 100000 | `256` | Open connections accepted at once, counted before any TLS handshake. Another connection is closed at once, unanswered. Open WebSockets (at most 16) count as connections. |
 | `chat_rate_limit_per_minute` | integer 1 to 10000 | `20` | `POST /api/chat` requests per minute for one login session (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`, and the model is not called (finding NET-2). |
 | `transcribe_rate_limit_per_minute` | integer 1 to 10000 | `20` | The same for `POST /api/voice/transcribe`. |
+| `api_rate_limit_per_minute` | integer 60 to 100000 | `600` | Requests per minute for one login session (per client address when login is off) across every `/api` route that needs a session, cheap reads and writes included. The two rows above still apply on top. The web UI polls about once a second per open tab, so leave room for every tab and device you use. Over it: `429 rate_limited` with `Retry-After` and a `request_refused` audit row (finding NET-3). `/api/health` and `/api/auth/login` are not counted. |
 
 When TLS is on, responses carry `Strict-Transport-Security`, the session cookie is `Secure`, and the CSP upgrades insecure requests.
 The CSP lets the page connect to its own origin only (`connect-src 'self'`), which covers the WebSocket in Chrome, Edge and Firefox; see [security](security/threat-model.md).

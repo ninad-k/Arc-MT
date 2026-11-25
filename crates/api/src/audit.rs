@@ -73,6 +73,12 @@ pub enum AuditKind {
     LearningReview,
     /// The Desk master account lock was set or changed.
     AccountLockChanged,
+    /// The user's preferences (persona, provider, voice, watchlist, aliases) were changed.
+    SettingsChanged,
+    /// A request was refused before it reached a handler: a foreign `Origin`, a non-loopback
+    /// `Host` while login is off, or a used-up request budget (AUD-1). At most one row per
+    /// reason and caller per minute.
+    RequestRefused,
 }
 
 impl AuditKind {
@@ -113,7 +119,35 @@ impl AuditKind {
             AuditKind::CouncilConfigChanged => "council_config_changed",
             AuditKind::LearningReview => "learning_review",
             AuditKind::AccountLockChanged => "account_lock_changed",
+            AuditKind::SettingsChanged => "settings_changed",
+            AuditKind::RequestRefused => "request_refused",
         }
+    }
+}
+
+tokio::task_local! {
+    /// The peer address of the request being handled on this task.
+    static CLIENT_IP: String;
+}
+
+fn current_client_ip() -> Option<String> {
+    CLIENT_IP.try_with(Clone::clone).ok()
+}
+
+/// Middleware: rows audited while this request is handled carry its peer address (AUD-1).
+/// Work a handler spawns onto another task is not covered; it records no `ip`. A request
+/// without a peer address (an in-process caller) gets none either.
+pub async fn with_client_ip(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string());
+    match peer {
+        Some(ip) => CLIENT_IP.scope(ip, next.run(req)).await,
+        None => next.run(req).await,
     }
 }
 
@@ -168,14 +202,19 @@ impl Audit {
         self.record_as(session_id, None, kind, payload).await;
     }
 
-    /// Append one row, noting which persona was active (rule 10).
+    /// Append one row, noting which persona was active (rule 10). A row written while a request
+    /// is being handled gets the client's address as `ip` (see [`with_client_ip`]) unless the
+    /// payload already names one.
     pub async fn record_as(
         &self,
         session_id: Option<Uuid>,
         persona: Option<&str>,
         kind: AuditKind,
-        payload: Value,
+        mut payload: Value,
     ) {
+        if let (Some(ip), Some(map)) = (current_client_ip(), payload.as_object_mut()) {
+            map.entry("ip").or_insert_with(|| Value::from(ip));
+        }
         let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let result = sqlx::query(
             "INSERT INTO audit (ts, session_id, kind, payload, persona)              VALUES (?1, ?2, ?3, ?4, ?5)",

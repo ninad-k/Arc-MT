@@ -26,6 +26,7 @@ long_request_timeout_secs = 300         # /api/chat, /api/voice/*, /api/confirm/
 # max_connections = 256                  # open connections at once; more are closed at once
 # chat_rate_limit_per_minute = 20        # POST /api/chat per session (each can cost several model calls)
 # transcribe_rate_limit_per_minute = 20  # POST /api/voice/transcribe per session
+# api_rate_limit_per_minute = 600        # every session route together, per session (60 to 100000)
 
 [bridge]
 # The EA binds here. Must be loopback.

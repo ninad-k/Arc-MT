@@ -81,6 +81,16 @@ pub async fn settings_put(
                 ApiError::Internal
             }
         })?;
+    // The body already parsed as a patch above, so it is JSON; settings hold no secrets.
+    let requested: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state
+        .audit()
+        .record(
+            None,
+            AuditKind::SettingsChanged,
+            json!({ "by": who(session.as_ref()), "patch": requested }),
+        )
+        .await;
     state.events().emit(Event::SettingsChanged);
     Ok(Json(updated))
 }

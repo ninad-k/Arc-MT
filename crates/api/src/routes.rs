@@ -253,9 +253,12 @@ pub fn app(state: AppState) -> Router {
 
     let sockets = Router::new().route("/api/ws", get(ws::handler));
 
+    // Every session route also draws on one API-wide budget (NET-3). The session check runs
+    // first (it is the outer layer), so the budget is kept per session.
     let protected = quick
         .merge(slow)
         .merge(sockets)
+        .route_layer(budget(Budget::Api))
         .route_layer(from_fn_with_state(
             state.clone(),
             auth_http::require_session,
@@ -298,8 +301,13 @@ pub fn app(state: AppState) -> Router {
             }),
         )
         .layer(cors)
-        .layer(from_fn_with_state(guard, security::request_guard))
+        .layer(from_fn_with_state(
+            (guard, state.clone()),
+            security::request_guard,
+        ))
         .layer(from_fn_with_state(hardening, security::apply))
+        // Outermost: every audit row written for a request carries its peer address (AUD-1).
+        .layer(axum::middleware::from_fn(crate::audit::with_client_ip))
         .with_state(state)
 }
 
@@ -315,6 +323,15 @@ async fn spend_budget(
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
             tracing::warn!(?budget, "request budget used up");
+            // Built before the await: the request must not be borrowed across it.
+            let details = serde_json::json!({
+                "budget": budget.as_str(),
+                "method": req.method().as_str(),
+                "path": redact_path(req.uri().path()),
+                "retry_after_secs": retry_after_secs,
+            });
+            drop(req);
+            state.audit_refusal("rate_limited", &key, details).await;
             ApiError::RateLimited { retry_after_secs }.into_response()
         }
     }
@@ -344,7 +361,7 @@ async fn health() -> Json<Value> {
 }
 
 /// `/api/confirm/<token>` -> `/api/confirm/<redacted>` (same for cancel and readback).
-fn redact_path(path: &str) -> String {
+pub(crate) fn redact_path(path: &str) -> String {
     for prefix in ["/api/confirm/", "/api/cancel/", "/api/readback/"] {
         if path.starts_with(prefix) {
             return format!("{prefix}<redacted>");

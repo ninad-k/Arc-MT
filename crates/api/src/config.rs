@@ -1142,6 +1142,11 @@ pub struct ServerConfig {
     /// `POST /api/voice/transcribe` requests per minute and session (NET-2). 1 to 10000.
     #[serde(default = "default_transcribe_rate_limit")]
     pub transcribe_rate_limit_per_minute: usize,
+    /// Requests per minute and session (the peer address when login is off) across every
+    /// `/api` route that needs a session (NET-3). The routes above also keep their own, smaller
+    /// budgets. The web UI polls about once a second per open tab. 60 to 100000.
+    #[serde(default = "default_api_rate_limit")]
+    pub api_rate_limit_per_minute: usize,
 }
 
 impl Default for ServerConfig {
@@ -1158,6 +1163,7 @@ impl Default for ServerConfig {
             max_connections: default_max_connections(),
             chat_rate_limit_per_minute: default_chat_rate_limit(),
             transcribe_rate_limit_per_minute: default_transcribe_rate_limit(),
+            api_rate_limit_per_minute: default_api_rate_limit(),
         }
     }
 }
@@ -1182,6 +1188,9 @@ fn default_chat_rate_limit() -> usize {
 }
 fn default_transcribe_rate_limit() -> usize {
     20
+}
+fn default_api_rate_limit() -> usize {
+    600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1527,6 +1536,9 @@ impl Config {
             if !(1..=10_000).contains(&value) {
                 bail!("server.{name} must be between 1 and 10000");
             }
+        }
+        if !(60..=100_000).contains(&s.api_rate_limit_per_minute) {
+            bail!("server.api_rate_limit_per_minute must be between 60 and 100000");
         }
         Ok(())
     }
@@ -2091,6 +2103,7 @@ warm_up = false",
         assert_eq!(s.max_connections, 256);
         assert_eq!(s.chat_rate_limit_per_minute, 20);
         assert_eq!(s.transcribe_rate_limit_per_minute, 20);
+        assert_eq!(s.api_rate_limit_per_minute, 600);
         // The example file spells the same numbers out.
         let e = Config::from_toml_str(EXAMPLE).unwrap();
         assert_eq!(e.server.header_read_timeout_secs, 10);
@@ -2112,6 +2125,8 @@ warm_up = false",
             "max_connections = 1",
             "chat_rate_limit_per_minute = 10000",
             "transcribe_rate_limit_per_minute = 1",
+            "api_rate_limit_per_minute = 60",
+            "api_rate_limit_per_minute = 100000",
         ] {
             assert!(with(ok).is_ok(), "{ok}");
         }
@@ -2127,6 +2142,9 @@ warm_up = false",
             "chat_rate_limit_per_minute = 0",
             "chat_rate_limit_per_minute = 10001",
             "transcribe_rate_limit_per_minute = 0",
+            // Below 60 a single open tab (about one poll a second) would lock itself out.
+            "api_rate_limit_per_minute = 59",
+            "api_rate_limit_per_minute = 100001",
         ] {
             assert!(with(bad).is_err(), "{bad}");
         }
