@@ -455,6 +455,21 @@ Same login rules as the other routes. See [desk-mode.md](desk-mode.md).
 - New audit kinds: `desk_finding`, `sentinel_verdict`, `pilot_preview`. Desk rows carry persona `desk`.
 - Outbound connections: Finnhub data calls are logged with purpose `desk finnhub`.
 
+## Alpaca (ADR-0024)
+
+Same login rules as the other routes. See [alpaca.md](alpaca.md).
+
+- `GET /api/status` gains `alpaca: {enabled, reason, connected, paper, market_open, error, symbols}`.
+- `GET /api/positions`, `GET /api/orders` and `GET /api/watchlist`: with Alpaca on, every row has
+  `venue` (`mt5` or `alpaca`). One venue failing still returns the other's rows, with
+  `errors: {mt5 | alpaca: message}`. Without Alpaca the answers are unchanged.
+- `GET /api/alpaca/account` -> `{enabled, currency, equity, cash, day_pl, buying_power, market_open,
+  next_open, next_close, blocked, error}`, or `{enabled: false, reason}`.
+- Previews, `POST /api/confirm/{token}`, cancel, read-back, close and cancel by ticket work for Alpaca
+  as for MT5; the server routes them by symbol, ticket or token. Modify on Alpaca answers `422`
+  (`gate_rejected`, not supported yet). An unclear Alpaca submit is `504 outcome_unknown` and is never re-sent.
+- Outbound connections: Alpaca requests are logged with purpose `alpaca`.
+
 ## Outbound connections
 
 `GET /api/egress?since=N` (same login rules as `/api/audit`) lists the requests the backend made to

@@ -584,10 +584,11 @@ impl Trading {
         if self.venue != crate::venue::VenueKind::Mt5
             && matches!(req.action, ProposedAction::Modify(_))
         {
-            return Err(TradingError::Snapshot(format!(
+            return Err(GateError::Invalid(format!(
                 "moving a stop loss or take profit is not supported on {} yet; close the                  position and open it again with the new levels",
                 self.venue.as_str()
-            )));
+            ))
+            .into());
         }
         let snapshot = self.snapshot(&req.action).await?;
         let broker = self.mt5_identity();

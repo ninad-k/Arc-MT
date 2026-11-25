@@ -31,6 +31,7 @@ The format is a short [MADR](https://adr.github.io/madr/)-style record. Each ADR
 | [0021](0021-notes-galaxy.md) | Notes galaxy, with answers drawn from the user's own notes | Accepted | 2026-11-11 |
 | [0022](0022-assistant-mode.md) | Two modes, with an Assistant on Claude that builds 3D models in a sandbox | Accepted | 2026-11-11 |
 | [0023](0023-nimbus-desk.md) | Desk mode, a nine-agent trading desk with one gated path for money | Accepted | 2026-11-24 |
+| [0024](0024-alpaca-venue.md) | Alpaca as a second venue, paper only, behind the same gate | Accepted | 2026-11-25 |
 
 ADRs 0005 to 0015 record decisions made for Sprints 2 to 5. Their features are planned and not yet implemented.
 

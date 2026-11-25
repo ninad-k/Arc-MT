@@ -343,6 +343,27 @@ Desk mode: Nimbus Desk, Friday and eight specialists. See [desk-mode.md](desk-mo
 | `finnhub_key_env` | string | `"FINNHUB_API_KEY"` | The environment variable holding the Finnhub key for insiders, fundamentals and filings. |
 | `scout_top` | integer, 1 to 50 | `8` | Movers Scout reports. |
 
+## `[alpaca]`
+
+US stocks on an Alpaca paper account, a second venue next to MT5. See [alpaca.md](alpaca.md) and
+[ADR-0024](adr/0024-alpaca-venue.md).
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Alpaca is on when the keys are set and the URL is paper; otherwise it is off and `/api/status` says why. |
+| `mode` | string | `"paper"` | The only accepted value. Live Alpaca is not supported. |
+| `trading_url_env`, `key_id_env`, `secret_key_env` | string | `ALPACA_TRADING_URL`, `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` | Environment variables with the URL and keys. A URL other than `https://paper-api.alpaca.markets` turns Alpaca off. |
+| `trading_url`, `data_url` | URL | paper and data hosts | Used when the variable is not set; https only. |
+| `feed` | `iex` or `sip` | `"iex"` | Quote and bar feed; `sip` needs an Alpaca subscription. |
+| `symbols` | list | `[]` | US stocks that trade on Alpaca (canonical names). |
+| `include_desk_universe` | boolean | `true` | Also send `[desk] universe` to Alpaca. |
+| `extended_hours` | boolean | `false` | Off: no Alpaca order while the US market is closed. |
+| `max_shares` | whole number | `100` | Shares per order at most (the gate's `max_lot` for Alpaca). |
+| `max_notional_usd` | number | `10000` | Order value per order at most. |
+| `max_positions` | integer | `5` | Open Alpaca positions at most. |
+| `max_daily_loss_usd` | number | `500` | No new Alpaca orders once today's realised loss reaches it. |
+| `timeout_secs` | integer | `10` | Per-request limit. |
+
 ## `[personas]`
 
 | Key | Type | Default | Effect and safety |

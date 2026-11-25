@@ -247,3 +247,25 @@ fomc_dates = []                 # extra FOMC decision days, "YYYY-MM-DD" (2026 i
 holidays = []                   # extra NYSE holidays (2026 and 2027 are built in)
 finnhub_key_env = "FINNHUB_API_KEY"
 scout_top = 8
+
+# ---- Alpaca: US stocks on an Alpaca PAPER account, a second venue next to MT5 (docs/alpaca.md, ADR-0024).
+# Keys in .env: ALPACA_TRADING_URL (paper host only), ALPACA_KEY_ID, ALPACA_SECRET_KEY. Without them Alpaca is
+# off and says why. Every Alpaca trade goes through the same preview, confirm, kill switch and these limits.
+# Free: paper trading and the IEX feed cost nothing.
+[alpaca]
+enabled = true
+mode = "paper"                  # the only accepted value
+trading_url_env = "ALPACA_TRADING_URL"
+key_id_env = "ALPACA_KEY_ID"
+secret_key_env = "ALPACA_SECRET_KEY"
+trading_url = "https://paper-api.alpaca.markets"   # used when ALPACA_TRADING_URL is not set
+data_url = "https://data.alpaca.markets"
+feed = "iex"                    # iex (free) or sip (subscription)
+symbols = []                    # US stocks that trade on Alpaca, e.g. ["NVDA", "AAPL"]
+include_desk_universe = true    # also [desk] universe
+extended_hours = false          # off: no Alpaca order while the US market is closed
+max_shares = 100                # per order
+max_notional_usd = 10000.0      # order value per order
+max_positions = 5
+max_daily_loss_usd = 500.0
+timeout_secs = 10
