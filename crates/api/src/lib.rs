@@ -7,8 +7,10 @@
 //! The same process serves the web UI, the login (password + TOTP, JWT cookie), the
 //! WebSocket event feed, the voice routes and, when configured, TLS.
 
+pub mod account_lock;
 pub mod agent;
 pub mod alpaca_venue;
+pub mod architecture_routes;
 pub mod assistant;
 pub mod assistant_routes;
 pub mod audit;
@@ -17,11 +19,13 @@ pub mod broker;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod decisions;
 pub mod desk;
 pub mod desk_routes;
 pub mod egress;
 pub mod events;
 pub mod grounding;
+pub mod learning;
 pub mod limit_overrides;
 pub mod market;
 pub mod market_journal;

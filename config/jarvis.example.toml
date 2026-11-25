@@ -26,6 +26,7 @@ long_request_timeout_secs = 300         # /api/chat, /api/voice/*, /api/confirm/
 # max_connections = 256                  # open connections at once; more are closed at once
 # chat_rate_limit_per_minute = 20        # POST /api/chat per session (each can cost several model calls)
 # transcribe_rate_limit_per_minute = 20  # POST /api/voice/transcribe per session
+# api_rate_limit_per_minute = 600        # every session route together, per session (60 to 100000)
 
 [bridge]
 # The EA binds here. Must be loopback.
@@ -247,6 +248,28 @@ fomc_dates = []                 # extra FOMC decision days, "YYYY-MM-DD" (2026 i
 holidays = []                   # extra NYSE holidays (2026 and 2027 are built in)
 finnhub_key_env = "FINNHUB_API_KEY"
 scout_top = 8
+# Architecture page (docs/architecture-page.md, ADR-0025): the council and the free scan.
+min_reward_risk = 1.5           # Sentinel: smallest reward to risk for a plan with a target
+min_council_score = 0.30        # the council passes at |score| >= this
+min_non_neutral = 3             # members that must take a side
+scan_every_minutes = 15         # free council scan while the US market is open; 0 = off
+master_account = 53107904       # the MT5 account the Desk may trade on (0 = no lock); changeable in the UI
+master_broker = "IC Markets"
+
+# ---- Learning review (ADR-0025): Claude explains statistics the code computed and suggests weight and guard
+# changes; nothing is applied without you. Paid: Sonnet 5.5 is $2 per million input tokens and $10 per million
+# output tokens; a review is about $0.03 (estimate). Runs only when you click "Run review".
+[learning]
+enabled = true
+provider = "claude"             # an [[llm.providers]] name
+model = "claude-sonnet-5-5"     # replaces the provider's model for this call; "" keeps it
+monthly_budget_usd = 2.0
+price_input_per_mtok = 2.0
+price_output_per_mtok = 10.0
+price_cache_read_per_mtok = 0.2
+price_cache_write_per_mtok = 2.5
+spend_file = "data/learning-spend.json"
+max_tokens = 3000
 
 # ---- Alpaca: US stocks on an Alpaca PAPER account, a second venue next to MT5 (docs/alpaca.md, ADR-0024).
 # Keys in .env: ALPACA_TRADING_URL (paper host only), ALPACA_KEY_ID, ALPACA_SECRET_KEY. Without them Alpaca is

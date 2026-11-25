@@ -638,9 +638,18 @@ async fn state_changing_requests_from_a_foreign_origin_are_refused() {
         }
     }
     assert_eq!(mock.executed_writes(), 0);
-    // Nothing reached the chat handler: no model call, no audit row.
+    // Nothing reached a handler: no model call, and the only audit row is the one refusal
+    // record (AUD-1: one per reason and caller per minute, however many were refused).
     assert_eq!(app.llm.request_count(), 0);
-    assert!(app.audit.rows(None).await.unwrap().is_empty());
+    let kinds: Vec<String> = app
+        .audit
+        .rows(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(kinds, ["request_refused"]);
 
     // The server's own origin and a non-browser client (no Origin) pass.
     let (status, _, _) = raw_request(

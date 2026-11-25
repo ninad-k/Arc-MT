@@ -59,7 +59,8 @@ test('settings fits at 375 px with every section open', async ({ page }) => {
 			return { id: e.id, left: r.left, right: r.right };
 		})
 	);
-	expect(boxes.length).toBe(7);
+	// Seven settings sections plus the Desk master account (ADR-0025).
+	expect(boxes.length).toBe(8);
 	for (const b of boxes) {
 		expect(b.left, b.id).toBeGreaterThanOrEqual(0);
 		expect(b.right, b.id).toBeLessThanOrEqual(375);

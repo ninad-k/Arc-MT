@@ -24,6 +24,7 @@ use chrono::{DateTime, Duration, Utc};
 use jarvis_bridge_client::BridgeClient;
 use jarvis_bridge_client::protocol::{self as wire, ExecType, Timeframe};
 use jarvis_desk::chartist::{Band, Chart, Level, LevelKind};
+use jarvis_desk::council::StopCode;
 use jarvis_desk::sentinel::{ApprovalStore, Plan, PlanRecord, Side};
 use jarvis_desk::session::{Exchange, SessionStatus, ny_local};
 use jarvis_desk::{AgentId, Finding, SeatState, Source};
@@ -51,6 +52,8 @@ use crate::trading::{PreviewDto, ProposeRequest, ProposeSource, Trading};
 
 /// The persona that speaks Desk turns.
 pub const DESK_PERSONA: &str = "friday";
+pub mod pipeline;
+
 /// What the audit log calls this mode; Ledger reads these rows back as the journal.
 pub const AUDIT_PERSONA: &str = "desk";
 pub const MAX_ROUNDS: usize = 8;
@@ -106,6 +109,8 @@ pub struct DeskParts {
     pub spend: Arc<SpendMeter>,
     pub events: EventBus,
     pub time: Arc<dyn TimeSource>,
+    /// The learning review's settings (spec-architecture-page).
+    pub learning: crate::config::LearningConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +159,8 @@ struct Found {
     preview: Option<PreviewDto>,
     chart: Option<Chart>,
     plans: Vec<PlanRecord>,
+    /// The Desk budget stopped the turn before the model answered.
+    budget_stopped: bool,
 }
 
 enum AskError {
@@ -174,6 +181,8 @@ pub enum PilotError {
         approved: f64,
         previewed: f64,
     },
+    /// MT5 is not on the master account (ADR-0025). Nothing was previewed.
+    AccountLock(String),
 }
 
 impl std::fmt::Display for PilotError {
@@ -184,6 +193,7 @@ impl std::fmt::Display for PilotError {
             PilotError::Rechecked(why) => {
                 write!(f, "Sentinel's rules no longer allow this plan: {why}")
             }
+            PilotError::AccountLock(why) => write!(f, "{why}"),
             PilotError::Oversized {
                 approved,
                 previewed,
@@ -206,6 +216,18 @@ pub struct Desk {
     pilot_previews: Mutex<HashMap<Uuid, String>>,
     /// Tickets of trades that came from Pilot previews (open Desk positions are these).
     desk_tickets: Mutex<HashSet<u64>>,
+    /// Decision records and the live council weights and guards (spec-architecture-page).
+    decisions: Arc<crate::decisions::Decisions>,
+    /// Turns started by "Ask Friday": session id -> decision id.
+    asks: Mutex<HashMap<Uuid, String>>,
+    /// The learning review's own monthly cap.
+    learning_spend: Arc<SpendMeter>,
+    /// The master account lock (ADR-0025).
+    account_lock: Arc<crate::account_lock::AccountLock>,
+    /// Tokens of Pilot previews: token -> (preview id, when), checked again at confirm.
+    pilot_tokens: Mutex<HashMap<String, (Uuid, Instant)>>,
+    /// One council scan at a time (the timer and "Scan now").
+    scan_lock: tokio::sync::Mutex<()>,
 }
 
 fn now_iso() -> String {
@@ -308,7 +330,34 @@ impl Desk {
                 )
             })
             .collect();
+        let decisions = Arc::new(crate::decisions::Decisions::new(
+            parts.audit.pool().clone(),
+            crate::decisions::LiveConfig {
+                version: None,
+                weights: jarvis_desk::council::Weights::default(),
+                guards: crate::decisions::Guards::new(
+                    &parts.config.rules(),
+                    &parts.config.council_rules(),
+                ),
+            },
+        ));
+        let learning_spend = Arc::new(SpendMeter::new(
+            Some(parts.learning.spend_file.clone().into()),
+            parts.learning.monthly_budget_usd,
+            parts.learning.prices(),
+        ));
+        let account_lock = Arc::new(crate::account_lock::AccountLock::new(
+            parts.audit.pool().clone(),
+            parts.config.master_account,
+            parts.config.master_broker.clone(),
+        ));
         Self {
+            decisions,
+            learning_spend,
+            account_lock,
+            pilot_tokens: Mutex::new(HashMap::new()),
+            scan_lock: tokio::sync::Mutex::new(()),
+            asks: Mutex::new(HashMap::new()),
             parts,
             exchange,
             approvals: ApprovalStore::new(),
@@ -332,6 +381,12 @@ impl Desk {
             // Desk positions opened before a restart are in the audit log.
             if let Some(desk) = weak.upgrade() {
                 desk.rebuild_tickets().await;
+                if let Err(e) = desk.account_lock.load().await {
+                    tracing::warn!(error = %e, "could not load the master account lock");
+                }
+                if let Err(e) = desk.decisions.load().await {
+                    tracing::warn!(error = %e, "could not load the council config versions");
+                }
             }
             loop {
                 match rx.recv().await {
@@ -341,6 +396,9 @@ impl Desk {
                     }) => {
                         let Some(desk) = weak.upgrade() else { break };
                         desk.note_executed(preview_id, &results);
+                        if let Err(e) = desk.decisions.executed(preview_id, &results).await {
+                            tracing::warn!(error = %e, "could not update the decision record");
+                        }
                     }
                     Ok(_) => {}
                     // Events were missed: read the executions back from the audit log.
@@ -408,6 +466,91 @@ impl Desk {
 
     pub fn config(&self) -> &DeskConfig {
         &self.parts.config
+    }
+
+    /// The decision records and live weights and guards.
+    pub fn decisions(&self) -> &Arc<crate::decisions::Decisions> {
+        &self.decisions
+    }
+
+    /// The master account lock.
+    pub fn account_lock(&self) -> &Arc<crate::account_lock::AccountLock> {
+        &self.account_lock
+    }
+
+    /// The lock as the browser may see it: MT5 is asked for its account, and only the
+    /// comparison comes back.
+    pub async fn master_account_view(&self) -> crate::account_lock::LockView {
+        let reported = self.parts.bridge.ping().await.ok().and_then(|p| p.login);
+        self.account_lock.view(reported)
+    }
+
+    /// Whether the master bot may trade `canonical` now: always for Alpaca symbols, for MT5
+    /// symbols only while MT5 is on the expected account.
+    async fn check_master(&self, canonical: &str) -> Result<(), String> {
+        if self.parts.router.is_alpaca_symbol(canonical) {
+            return Ok(());
+        }
+        self.check_master_mt5().await
+    }
+
+    /// The lock for an MT5 trade. The refusal names no account number: it can reach the model
+    /// as a tool error (ADR-0025); the page shows the masked number from the lock view.
+    async fn check_master_mt5(&self) -> Result<(), String> {
+        use crate::account_lock::LockState;
+        match self.master_account_view().await.state {
+            LockState::Locked | LockState::Off => Ok(()),
+            LockState::Mismatch => Err(
+                "MT5 is logged into a different account than the Desk master account, so the \
+                 Desk will not trade on MT5."
+                    .into(),
+            ),
+            LockState::Unverified => Err(
+                "Cannot confirm that MT5 is on the Desk master account (the EA must be 0.7.0 or \
+                 later and MT5 reachable), so the Desk will not trade on MT5."
+                    .into(),
+            ),
+        }
+    }
+
+    /// Checked at confirm for Pilot's previews: MT5 must still be on the master account.
+    pub async fn confirm_check(&self, token: &str) -> Result<(), String> {
+        let entry = lock(&self.pilot_tokens).get(token).cloned();
+        let Some((preview_id, _)) = entry else {
+            return Ok(());
+        };
+        // The venue that holds the token decides, not the symbol.
+        if self.parts.router.for_token(token).venue() != crate::venue::VenueKind::Mt5 {
+            return Ok(());
+        }
+        if let Err(why) = self.check_master_mt5().await {
+            let _ = self
+                .decisions
+                .stop_by_preview(preview_id, &StopCode::AccountMismatch, &why)
+                .await;
+            return Err(why);
+        }
+        Ok(())
+    }
+
+    /// The learning review's settings.
+    pub fn learning_config(&self) -> &crate::config::LearningConfig {
+        &self.parts.learning
+    }
+
+    /// The audit log.
+    pub fn audit(&self) -> &Audit {
+        &self.parts.audit
+    }
+
+    /// The learning review's spend meter.
+    pub fn learning_spend(&self) -> &Arc<SpendMeter> {
+        &self.learning_spend
+    }
+
+    /// Sentinel's live rules: the newest config version, else `[desk]`.
+    pub fn rules(&self) -> jarvis_desk::sentinel::Rules {
+        self.decisions.live().guards.rules()
     }
 
     pub fn spend(&self) -> &Arc<SpendMeter> {
@@ -703,7 +846,10 @@ impl Desk {
             };
             let response = match self.ask_model(provider, metered, &request, sid).await {
                 Ok(r) => r,
-                Err(AskError::Budget(status)) => break budget_reply(&status),
+                Err(AskError::Budget(status)) => {
+                    found.budget_stopped = true;
+                    break budget_reply(&status);
+                }
                 Err(AskError::Llm(e)) if round == 1 => {
                     self.set_seat(AgentId::Friday, SeatState::Error, None);
                     return Err(e);
@@ -810,6 +956,8 @@ impl Desk {
             json!({ "text": reply, "mode": "desk", "provider": provider.name() }),
         )
         .await;
+        self.record_turn(sid, provider, &system, &history, message, &reply, &found)
+            .await;
         self.store(sid, history);
         self.set_seat(
             AgentId::Friday,
@@ -1516,7 +1664,7 @@ impl Desk {
             currency: Some(account.currency.clone()),
             sizing_error,
         };
-        let verdict = jarvis_desk::sentinel::review(&plan, &ctx, &self.parts.config.rules());
+        let verdict = jarvis_desk::sentinel::review(&plan, &ctx, &self.rules());
         let id = Uuid::new_v4().simple().to_string();
         Ok(self.approvals.insert(id, plan, verdict, self.now_ms()))
     }
@@ -1603,7 +1751,13 @@ impl Desk {
         let record = match self.approvals.take(plan_id, self.now_ms()) {
             Ok(r) => r,
             Err(e) => {
-                self.pilot_refused(plan_id, session, &e.to_string()).await;
+                use jarvis_desk::sentinel::ApprovalError as A;
+                let code = match &e {
+                    A::Expired => Some(StopCode::PreviewExpired),
+                    A::Vetoed | A::Used | A::Unknown(_) => None,
+                };
+                self.pilot_refused(plan_id, session, &e.to_string(), code)
+                    .await;
                 return Err(PilotError::Approval(e));
             }
         };
@@ -1611,18 +1765,36 @@ impl Desk {
         // The kill switch answers as it does everywhere else (423).
         if self.parts.trading.kill_switch_engaged() {
             let e = crate::trading::TradingError::KillSwitch;
-            self.pilot_refused(plan_id, session, &e.to_string()).await;
+            self.pilot_refused(plan_id, session, &e.to_string(), Some(StopCode::KillSwitch))
+                .await;
             return Err(PilotError::Refused(e));
+        }
+        // The master account lock (ADR-0025): MT5 must be on the expected account.
+        if let Err(why) = self.check_master(&p.symbol).await {
+            self.approvals.restore(plan_id);
+            self.pilot_refused(plan_id, session, &why, Some(StopCode::AccountMismatch))
+                .await;
+            return Err(PilotError::AccountLock(why));
         }
         // What can change in two minutes (positions opened meanwhile, the session, the kill
         // switch) is checked again; a plan that would now be vetoed is not previewed.
         let recheck = match self.risk_context(&p.symbol).await {
-            Ok(ctx) => jarvis_desk::sentinel::review(p, &ctx, &self.parts.config.rules()),
-            Err(e) => jarvis_desk::sentinel::Verdict::Vetoed { reasons: vec![e] },
+            Ok(ctx) => jarvis_desk::sentinel::review(p, &ctx, &self.rules()),
+            Err(e) => jarvis_desk::sentinel::Verdict::Vetoed {
+                reasons: vec![e],
+                rules: vec!["context".to_owned()],
+            },
         };
-        if let jarvis_desk::sentinel::Verdict::Vetoed { reasons } = recheck {
+        if let jarvis_desk::sentinel::Verdict::Vetoed { reasons, rules } = recheck {
             let err = PilotError::Rechecked(reasons.join(" "));
-            self.pilot_refused(plan_id, session, &err.to_string()).await;
+            let rule = rules.first().cloned().unwrap_or_else(|| "recheck".into());
+            self.pilot_refused(
+                plan_id,
+                session,
+                &err.to_string(),
+                Some(StopCode::SentinelVeto(rule)),
+            )
+            .await;
             return Err(err);
         }
         let side = match p.side {
@@ -1656,7 +1828,9 @@ impl Desk {
             Ok(p) => p,
             Err(e) => {
                 self.approvals.restore(plan_id);
-                self.pilot_refused(plan_id, session, &e.to_string()).await;
+                let code = crate::decisions::stop_for_trading_error(&e);
+                self.pilot_refused(plan_id, session, &e.to_string(), Some(code))
+                    .await;
                 return Err(PilotError::Refused(e));
             }
         };
@@ -1667,7 +1841,13 @@ impl Desk {
                 approved: p.volume,
                 previewed: preview.total_volume,
             };
-            self.pilot_refused(plan_id, session, &err.to_string()).await;
+            self.pilot_refused(
+                plan_id,
+                session,
+                &err.to_string(),
+                Some(StopCode::GateLimit("oversized".into())),
+            )
+            .await;
             return Err(err);
         }
         {
@@ -1678,6 +1858,14 @@ impl Desk {
             }
             map.insert(preview.id, plan_id.to_owned());
         }
+        {
+            let mut tokens = lock(&self.pilot_tokens);
+            // Previews live 15 s; drop only entries far past that, never a live one.
+            if tokens.len() >= 500 {
+                tokens.retain(|_, (_, at)| at.elapsed() < std::time::Duration::from_secs(120));
+            }
+            tokens.insert(preview.token.clone(), (preview.id, Instant::now()));
+        }
         self.rec(
             session,
             AuditKind::PilotPreview,
@@ -1685,13 +1873,29 @@ impl Desk {
                     "description": preview.description, "volume": preview.total_volume }),
         )
         .await;
+        if let Err(e) = self.decisions.link_preview(plan_id, preview.id).await {
+            tracing::warn!(error = %e, "could not link the preview to its decision");
+        }
         let summary = format!("Preview ready: {}.", preview.description);
         self.set_seat(AgentId::Pilot, SeatState::Done, Some(summary.clone()));
         self.signal(AgentId::Pilot, "ok", summary);
         Ok(preview)
     }
 
-    async fn pilot_refused(&self, plan_id: &str, session: Option<Uuid>, why: &str) {
+    /// `code`: the decision's stop code, or `None` when the refusal says nothing new about the
+    /// decision (a vetoed, used or unknown approval: the decision already has its ending).
+    async fn pilot_refused(
+        &self,
+        plan_id: &str,
+        session: Option<Uuid>,
+        why: &str,
+        code: Option<StopCode>,
+    ) {
+        if let Some(code) = code
+            && let Err(e) = self.decisions.stop_by_plan(plan_id, &code, why).await
+        {
+            tracing::warn!(error = %e, "could not stop the decision");
+        }
         self.rec(
             session,
             AuditKind::PilotPreview,

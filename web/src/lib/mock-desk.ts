@@ -91,7 +91,7 @@ function ymd(d: Date): string {
 	return d.toISOString().slice(0, 10);
 }
 
-function session(now = new Date()): SessionStatus {
+export function session(now = new Date()): SessionStatus {
 	const off = nyOffsetHours(now);
 	const local = new Date(now.getTime() + off * 3600_000);
 	const date = ymd(local);

@@ -16,7 +16,7 @@
 #include "Json.mqh"
 
 #define JARVIS_PROTOCOL_VERSION   2
-#define JARVIS_EA_VERSION         "0.6.0"
+#define JARVIS_EA_VERSION         "0.7.0"
 
 #define JARVIS_RC_INVALID         (-1)
 #define JARVIS_RC_UNKNOWN_CMD     (-2)
@@ -182,6 +182,9 @@ int Jarvis_CmdPing(CJson &req,const int args,CJsonWriter &w,string &err)
    w.PutBool("terminal_connected",TerminalInfoInteger(TERMINAL_CONNECTED)!=0);
    w.PutBool("trade_allowed",allowed);
    w.PutInt("server_time",(long)TimeTradeServer());
+   // ADR-0025: the account number, for the backend to compare with the Desk master account
+   // lock. The backend never forwards it to the browser or the language model.
+   w.PutInt("login",(long)AccountInfoInteger(ACCOUNT_LOGIN));
    w.EndObject();
    return 0;
   }

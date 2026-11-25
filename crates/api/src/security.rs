@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use sha2::{Digest, Sha256};
 
 use crate::routes::ApiError;
+use crate::state::AppState;
 
 /// Most HTML files scanned for inline scripts at startup, and the largest one read.
 const MAX_HTML_FILES: usize = 64;
@@ -250,23 +251,51 @@ impl RequestGuard {
 ///   own origin nor a configured dev origin. `SameSite=Strict` already stops other *sites*; this
 ///   also stops other *origins of the same site* (another port on `localhost`, a sibling
 ///   sub-domain), which browsers treat as same-site.
+///
+/// Each refusal is also audited (AUD-1), at most once a minute per reason and peer address.
 pub async fn request_guard(
-    State(guard): State<Arc<RequestGuard>>,
+    State((guard, state)): State<(Arc<RequestGuard>, AppState)>,
     req: Request,
     next: Next,
 ) -> Response {
     if is_api_path(req.uri().path()) {
         if guard.loopback_hosts_only && !host_is_loopback(req.headers(), req.uri()) {
             tracing::warn!("request refused: non-loopback Host while login is disabled");
+            let (caller, details) = refusal_details(&req);
+            state
+                .audit_refusal("host_not_allowed", &caller, details)
+                .await;
             return ApiError::Forbidden("host not allowed".to_owned()).into_response();
         }
         let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
         if !safe && !origin_allowed(req.headers(), &guard.dev_origins) {
             tracing::warn!("state-changing request refused: foreign Origin");
+            let (caller, details) = refusal_details(&req);
+            state
+                .audit_refusal("foreign_origin", &caller, details)
+                .await;
             return ApiError::Forbidden("origin not allowed".to_owned()).into_response();
         }
     }
     next.run(req).await
+}
+
+/// Who sent a refused request (its peer address) and what goes in its audit row: method, path
+/// (tokens redacted), and the `Origin` and `Host` it named, cut to a sane length.
+fn refusal_details(req: &Request) -> (String, serde_json::Value) {
+    let named = |name: header::HeaderName| {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.chars().take(200).collect::<String>())
+    };
+    let details = serde_json::json!({
+        "method": req.method().as_str(),
+        "path": crate::routes::redact_path(req.uri().path()),
+        "origin": named(header::ORIGIN),
+        "host": named(header::HOST),
+    });
+    (crate::auth::http::peer_ip_of(req.extensions()), details)
 }
 
 /// The outermost middleware.

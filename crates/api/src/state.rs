@@ -267,6 +267,9 @@ struct Inner {
     chat_limiter: RateLimiter,
     transcribe_limiter: RateLimiter,
     market_limiter: RateLimiter,
+    api_limiter: RateLimiter,
+    /// One `request_refused` audit row per reason and caller per window (AUD-1).
+    refusal_audit_limiter: RateLimiter,
     /// Market views, the calendar and news; `None` when `[market] enabled = false`.
     market: Option<Arc<MarketService>>,
     /// Every outbound request to another service (FL-3).
@@ -284,12 +287,25 @@ struct Inner {
 /// The window of the per-session request budgets.
 const REQUEST_RATE_WINDOW_MS: i64 = 60_000;
 
-/// Which expensive route a request budget is for.
+/// Which expensive route a request budget is for. `Api` is the budget every session route
+/// shares (NET-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Budget {
     Chat,
     Transcribe,
     Market,
+    Api,
+}
+
+impl Budget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Budget::Chat => "chat",
+            Budget::Transcribe => "transcribe",
+            Budget::Market => "market",
+            Budget::Api => "api",
+        }
+    }
 }
 
 /// Cheap to clone; shared by every request handler.
@@ -366,6 +382,7 @@ impl AppState {
             })
             .collect();
         let clock = ServerClock::default();
+        let api_per_minute = config.server.api_rate_limit_per_minute;
         let (chat_per_minute, transcribe_per_minute) = (
             config.server.chat_rate_limit_per_minute,
             config.server.transcribe_rate_limit_per_minute,
@@ -486,6 +503,7 @@ impl AppState {
                 )),
                 events: events.clone(),
                 time: time.clone(),
+                learning: config.learning.clone(),
             }));
             desk.follow_trades();
             desk
@@ -512,6 +530,8 @@ impl AppState {
             chat_limiter: RateLimiter::new(chat_per_minute, REQUEST_RATE_WINDOW_MS),
             transcribe_limiter: RateLimiter::new(transcribe_per_minute, REQUEST_RATE_WINDOW_MS),
             market_limiter: RateLimiter::new(market_per_minute, REQUEST_RATE_WINDOW_MS),
+            api_limiter: RateLimiter::new(api_per_minute, REQUEST_RATE_WINDOW_MS),
+            refusal_audit_limiter: RateLimiter::new(1, REQUEST_RATE_WINDOW_MS),
             market,
             egress,
             notes,
@@ -717,6 +737,30 @@ impl AppState {
             ProviderSlot::Unavailable(reason) => Err(format!("provider '{name}': {reason}")),
         }
     }
+    /// The provider the learning review asks, with `[learning] model` in place of a Claude
+    /// provider's own model, and whether it is metered (Claude).
+    pub fn learning_provider(&self) -> Result<(Arc<dyn jarvis_llm::LlmProvider>, bool), String> {
+        let cfg = &self.0.config.learning;
+        if !cfg.enabled {
+            return Err("the learning review is off ([learning] enabled = false)".into());
+        }
+        let entry = self
+            .provider(&cfg.provider)
+            .ok_or_else(|| format!("no [[llm.providers]] entry named '{}'", cfg.provider))?;
+        let ProviderSlot::Available(p) = &entry.slot else {
+            return Err(format!("provider '{}' is not available", cfg.provider));
+        };
+        let claude = entry.config.kind == jarvis_llm::ProviderKind::Anthropic;
+        if !claude || cfg.model.is_empty() || cfg.model == entry.config.model {
+            return Ok((p.clone(), claude));
+        }
+        let mut c = entry.config.clone();
+        c.model = cfg.model.clone();
+        jarvis_llm::build_provider(&c)
+            .map(|b| (Arc::from(b), true))
+            .map_err(|e| format!("provider '{}' with model {}: {e}", cfg.provider, cfg.model))
+    }
+
     /// The user's notes, when `[notes]` is on.
     pub fn notes(&self) -> Option<&Arc<jarvis_notes::NotesService>> {
         self.0.notes.as_ref()
@@ -937,7 +981,29 @@ impl AppState {
             Budget::Chat => self.0.chat_limiter.check(key, now),
             Budget::Transcribe => self.0.transcribe_limiter.check(key, now),
             Budget::Market => self.0.market_limiter.check(key, now),
+            Budget::Api => self.0.api_limiter.check(key, now),
         }
+    }
+
+    /// Audit a refused request (AUD-1): at most one row per `reason` and `caller` per minute,
+    /// so a flood of refusals cannot flood the audit table. `details` must not hold secrets
+    /// (pass paths through `routes::redact_path`).
+    pub async fn audit_refusal(&self, reason: &str, caller: &str, mut details: Value) {
+        let now = self.0.trading.now_ms();
+        if self
+            .0
+            .refusal_audit_limiter
+            .check(&format!("{reason}|{caller}"), now)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(map) = details.as_object_mut() {
+            map.insert("reason".to_owned(), Value::from(reason));
+        }
+        self.audit()
+            .record(None, crate::audit::AuditKind::RequestRefused, details)
+            .await;
     }
 
     pub fn providers(&self) -> &[ProviderEntry] {
@@ -997,6 +1063,8 @@ impl AppState {
                 state.0.chat_limiter.purge(now);
                 state.0.transcribe_limiter.purge(now);
                 state.0.market_limiter.purge(now);
+                state.0.api_limiter.purge(now);
+                state.0.refusal_audit_limiter.purge(now);
                 if let Some(auth) = &auth {
                     auth.purge().await;
                 }
@@ -1075,6 +1143,46 @@ impl AppState {
                                 "market views scored"
                             );
                         }
+                    }
+                    _ = stop.changed() => break,
+                }
+            }
+        }))
+    }
+
+    /// Start the free council scan (spec-architecture-page): every `[desk] scan_every_minutes`
+    /// while the US market is open, over the default watchlist and `[desk] universe`. No
+    /// language model runs. `None` when Desk mode or the scan is off.
+    pub fn spawn_council_scanner(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let desk = self.desk()?.clone();
+        let minutes = self.0.config.desk.scan_every_minutes;
+        if minutes == 0 {
+            return None;
+        }
+        let state = self.clone();
+        let mut stop = self.0.shutdown.subscribe();
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(minutes * 60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let _ = desk.decisions().settle(chrono::Utc::now().timestamp_millis()).await;
+                        let resolved = desk.resolve_outcomes().await;
+                        if resolved > 0 {
+                            tracing::info!(resolved, "decision outcomes resolved");
+                        }
+                        if desk.session_status().phase != jarvis_desk::session::Phase::Open {
+                            continue;
+                        }
+                        let settings = state.user_settings(None).await;
+                        let user = crate::desk::DeskUser {
+                            resolver: state.resolver_for(&settings),
+                            watchlist: settings.watchlist.clone(),
+                            intent: jarvis_gate::intent::Intent::Other,
+                        };
+                        let ids = desk.scan(&user).await;
+                        tracing::info!(decisions = ids.len(), "council scan");
                     }
                     _ = stop.changed() => break,
                 }

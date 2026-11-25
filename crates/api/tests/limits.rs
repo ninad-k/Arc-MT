@@ -472,6 +472,208 @@ async fn without_login_the_budget_is_kept_per_address() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
 }
 
+// ------------------------------------------- the API-wide budget (NET-3)
+
+#[tokio::test]
+async fn every_api_route_shares_one_budget_per_session() {
+    let (app, _mock) = app_with(
+        "api_rate_limit_per_minute = 60",
+        ScriptedLlm::new("fake", vec![]),
+        true,
+    )
+    .await;
+    let (alice, bob) = two_sessions(&app).await;
+    // Cheap reads and writes alike draw on it.
+    for i in 0..60 {
+        let path = if i % 2 == 0 {
+            "/api/settings"
+        } else {
+            "/api/killswitch"
+        };
+        let (status, body) = request_as(&app, &alice, "GET", path, None).await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "request {i}: {body}");
+    }
+    let (status, headers, bytes) = raw_request(
+        &app.router,
+        "GET",
+        "/api/positions",
+        &[("cookie", &alice)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited");
+    assert!(headers.contains_key("retry-after"));
+
+    // Another session has its own budget; the public routes have none.
+    let (status, _) = request_as(&app, &bob, "GET", "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(&app.router, "GET", "/api/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    app.clock().advance_ms(61_000);
+    let (status, _) = request_as(&app, &alice, "GET", "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "the window moves on");
+}
+
+#[tokio::test]
+async fn without_login_the_api_budget_is_kept_per_address() {
+    let (app, _mock) = app_with(
+        "api_rate_limit_per_minute = 60",
+        ScriptedLlm::new("fake", vec![]),
+        false,
+    )
+    .await;
+    for i in 0..60 {
+        let (status, body) = request(&app.router, "GET", "/api/settings", None).await;
+        assert_eq!(status, StatusCode::OK, "request {i}: {body}");
+    }
+    let (status, body) = request(&app.router, "DELETE", "/api/settings/limits", None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
+
+// ------------------------------------------------ audit coverage (AUD-1)
+
+async fn audit_rows_of(app: &TestApp, kind: &str) -> Vec<Value> {
+    app.audit
+        .rows(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == kind)
+        .map(|r| r.payload)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_settings_change_is_audited() {
+    let (app, _mock) = app_with("", ScriptedLlm::new("fake", vec![]), false).await;
+    let (status, body) = request(
+        &app.router,
+        "PUT",
+        "/api/settings",
+        Some(json!({ "watchlist": ["XAUUSD", "EURUSD"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = audit_rows_of(&app, "settings_changed").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["by"], "local");
+    assert_eq!(
+        rows[0]["patch"],
+        json!({ "watchlist": ["XAUUSD", "EURUSD"] })
+    );
+
+    // A refused patch changes nothing and is not recorded as a change.
+    let (status, _) = request(
+        &app.router,
+        "PUT",
+        "/api/settings",
+        Some(json!({ "persona": "nobody" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(audit_rows_of(&app, "settings_changed").await.len(), 1);
+}
+
+#[tokio::test]
+async fn refused_requests_are_audited_at_most_once_a_minute_per_reason_and_caller() {
+    let (app, _mock) = app_with(
+        "chat_rate_limit_per_minute = 1",
+        ScriptedLlm::always("fake", text_response("ok")),
+        true,
+    )
+    .await;
+    let (cookie, _) = two_sessions(&app).await;
+    let foreign = [("origin", "https://malicious-site.com")];
+    for _ in 0..3 {
+        let (status, _, _) = raw_request(
+            &app.router,
+            "POST",
+            "/api/killswitch",
+            &foreign,
+            Some(json!({ "engaged": true }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(chat_as(&app, &cookie).await.0, StatusCode::OK);
+    for _ in 0..3 {
+        assert_eq!(
+            chat_as(&app, &cookie).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    let rows = audit_rows_of(&app, "request_refused").await;
+    assert_eq!(rows.len(), 2, "one per reason and caller: {rows:?}");
+    let origin = rows
+        .iter()
+        .find(|r| r["reason"] == "foreign_origin")
+        .unwrap();
+    assert_eq!(origin["method"], "POST");
+    assert_eq!(origin["path"], "/api/killswitch");
+    assert_eq!(origin["origin"], "https://malicious-site.com");
+    let budget = rows.iter().find(|r| r["reason"] == "rate_limited").unwrap();
+    assert_eq!(budget["budget"], "chat");
+    assert_eq!(budget["path"], "/api/chat");
+
+    // The next minute gets a row again.
+    app.clock().advance_ms(61_000);
+    let (status, _, _) = raw_request(&app.router, "POST", "/api/killswitch", &foreign, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(audit_rows_of(&app, "request_refused").await.len(), 3);
+}
+
+#[tokio::test]
+async fn a_refused_request_never_puts_a_confirmation_token_in_the_audit_log() {
+    let (app, _mock) = app_with("", ScriptedLlm::new("fake", vec![]), false).await;
+    let (status, _, _) = raw_request(
+        &app.router,
+        "POST",
+        "/api/confirm/secret-token-value",
+        &[("origin", "https://malicious-site.com")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let rows = audit_rows_of(&app, "request_refused").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["path"], "/api/confirm/<redacted>");
+    assert!(!rows[0].to_string().contains("secret-token-value"));
+}
+
+#[tokio::test]
+async fn audit_rows_written_for_a_request_carry_the_client_address() {
+    let (app, _mock) = app_with("", ScriptedLlm::new("fake", vec![]), false).await;
+    let mut req = Request::builder()
+        .method("PUT")
+        .uri("/api/settings")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "watchlist": ["XAUUSD"] }).to_string()))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.9:50000".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rows = audit_rows_of(&app, "settings_changed").await;
+    assert_eq!(rows[0]["ip"], "127.0.0.9", "{rows:?}");
+
+    // Without a peer address (an in-process caller) nothing is invented.
+    let (status, _) = request(
+        &app.router,
+        "PUT",
+        "/api/settings",
+        Some(json!({ "watchlist": ["EURUSD"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = audit_rows_of(&app, "settings_changed").await;
+    assert!(rows[1].get("ip").is_none(), "{rows:?}");
+}
+
 // ------------------------------------------------------------- CSP (CSP-1)
 
 #[tokio::test]

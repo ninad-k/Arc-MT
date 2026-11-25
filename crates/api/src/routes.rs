@@ -143,6 +143,48 @@ pub fn app(state: AppState) -> Router {
             )),
         )
         .route("/api/desk/state", get(crate::desk_routes::state))
+        // The architecture page (spec-architecture-page): reads from SQLite, no bridge call.
+        .route(
+            "/api/architecture/map",
+            get(crate::architecture_routes::map),
+        )
+        .route(
+            "/api/architecture/decisions",
+            get(crate::architecture_routes::list),
+        )
+        .route(
+            "/api/architecture/decisions/{id}",
+            get(crate::architecture_routes::get),
+        )
+        .route(
+            "/api/architecture/decisions/{id}/review",
+            put(crate::architecture_routes::review_put),
+        )
+        .route(
+            "/api/architecture/funnel",
+            get(crate::architecture_routes::funnel),
+        )
+        .route(
+            "/api/architecture/versions",
+            get(crate::architecture_routes::versions),
+        )
+        .route(
+            "/api/architecture/versions/{version}/rollback",
+            post(crate::architecture_routes::rollback),
+        )
+        .route(
+            "/api/architecture/learning",
+            get(crate::architecture_routes::learning),
+        )
+        .route(
+            "/api/architecture/account-lock",
+            get(crate::architecture_routes::account_lock_get)
+                .put(crate::architecture_routes::account_lock_put),
+        )
+        .route(
+            "/api/architecture/learning/apply",
+            post(crate::architecture_routes::learning_apply),
+        )
         .route("/api/alpaca/account", get(alpaca_account))
         .route(
             "/api/assistant/status",
@@ -167,6 +209,19 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/desk/pulse",
             get(crate::desk_routes::pulse).layer(budget(Budget::Market)),
+        )
+        // The free council scan reads bars for every symbol; Ask Friday is a Desk turn.
+        .route(
+            "/api/architecture/scan",
+            post(crate::architecture_routes::scan).layer(budget(Budget::Market)),
+        )
+        .route(
+            "/api/architecture/decisions/{id}/ask",
+            post(crate::architecture_routes::ask).layer(budget(Budget::Chat)),
+        )
+        .route(
+            "/api/architecture/learning/review",
+            post(crate::architecture_routes::learning_review).layer(budget(Budget::Chat)),
         )
         // Claude builds from a picture: as slow as a chat turn, with the chat budget.
         .route(
@@ -198,9 +253,12 @@ pub fn app(state: AppState) -> Router {
 
     let sockets = Router::new().route("/api/ws", get(ws::handler));
 
+    // Every session route also draws on one API-wide budget (NET-3). The session check runs
+    // first (it is the outer layer), so the budget is kept per session.
     let protected = quick
         .merge(slow)
         .merge(sockets)
+        .route_layer(budget(Budget::Api))
         .route_layer(from_fn_with_state(
             state.clone(),
             auth_http::require_session,
@@ -243,8 +301,13 @@ pub fn app(state: AppState) -> Router {
             }),
         )
         .layer(cors)
-        .layer(from_fn_with_state(guard, security::request_guard))
+        .layer(from_fn_with_state(
+            (guard, state.clone()),
+            security::request_guard,
+        ))
         .layer(from_fn_with_state(hardening, security::apply))
+        // Outermost: every audit row written for a request carries its peer address (AUD-1).
+        .layer(axum::middleware::from_fn(crate::audit::with_client_ip))
         .with_state(state)
 }
 
@@ -260,6 +323,15 @@ async fn spend_budget(
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
             tracing::warn!(?budget, "request budget used up");
+            // Built before the await: the request must not be borrowed across it.
+            let details = serde_json::json!({
+                "budget": budget.as_str(),
+                "method": req.method().as_str(),
+                "path": redact_path(req.uri().path()),
+                "retry_after_secs": retry_after_secs,
+            });
+            drop(req);
+            state.audit_refusal("rate_limited", &key, details).await;
             ApiError::RateLimited { retry_after_secs }.into_response()
         }
     }
@@ -289,7 +361,7 @@ async fn health() -> Json<Value> {
 }
 
 /// `/api/confirm/<token>` -> `/api/confirm/<redacted>` (same for cancel and readback).
-fn redact_path(path: &str) -> String {
+pub(crate) fn redact_path(path: &str) -> String {
     for prefix in ["/api/confirm/", "/api/cancel/", "/api/readback/"] {
         if path.starts_with(prefix) {
             return format!("{prefix}<redacted>");
@@ -1206,6 +1278,12 @@ async fn confirm(
     parts: Parts,
 ) -> Result<Json<ConfirmResponse>, ApiError> {
     let key = client_key(&parts);
+    // A Pilot preview needs MT5 still on the Desk master account (ADR-0025).
+    if let Some(desk) = state.desk() {
+        desk.confirm_check(&token)
+            .await
+            .map_err(ApiError::GateRejected)?;
+    }
     let response = state
         .router()
         .for_token(&token)

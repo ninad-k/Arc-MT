@@ -116,7 +116,9 @@ Response:
 - `message` must be 1–2000 characters.
 - At most `[server] chat_rate_limit_per_minute` (20) requests per minute for one login session
   (per client address when login is off): the next one gets `429 rate_limited` with
-  `Retry-After`, before the body is read and without calling the model. A request that takes
+  `Retry-After`, before the body is read and without calling the model. Every route that needs
+  a session also shares `[server] api_rate_limit_per_minute` (600) per session, with the same
+  `429` (NET-3); `/api/health` and `/api/auth/login` are outside it. A request that takes
   longer than `[server] long_request_timeout_secs` (200 s) is stopped with `408 request_timeout`.
 - Session history stays in memory (lost on restart) and is capped at the last 40 messages.
 - Every turn writes audit rows: `utterance`, `tool_call`, `bridge_request`, `bridge_reply`, `assistant_reply`.
@@ -330,7 +332,19 @@ ever sent to the browser, never to the LLM.
 
 Audit kinds added: `intent`, `preview`, `gate_rejected`, `confirm`, `confirm_second`,
 `cancel`, `trade_result`, `kill_switch`, `login`, `login_failed`, `voice_stt`, `voice_tts`,
-`limits_changed`, `ungrounded_reply`, `ungrounded_reply_blocked`.
+`limits_changed`, `ungrounded_reply`, `ungrounded_reply_blocked`, `settings_changed`,
+`request_refused`.
+
+- Every row written while a request is handled carries the client's address as `ip` (AUD-1),
+  unless the row already names one. Rows written by background work (start-up, scans, the
+  market evaluator) and by in-process callers have no `ip`.
+- `settings_changed` rows carry `{by, patch}`: who changed them (`local` with login off) and the
+  `PUT /api/settings` body as sent. A refused patch writes nothing.
+- `request_refused` rows record a request stopped before any handler ran: `reason` is
+  `foreign_origin` or `host_not_allowed` (with `method`, `path`, `origin`, `host`), or
+  `rate_limited` (with `budget`, `method`, `path`, `retry_after_secs`). Confirmation tokens in
+  the path are written as `<redacted>`. At most one row per reason and caller per minute, so a
+  flood of refusals cannot flood the log; the process log still has a line for each one.
 
 **Grounding check.** Every final chat reply is checked for figures (prices, amounts,
 percentages, lots) that did not come from a tool result, the user's own messages or the

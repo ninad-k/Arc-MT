@@ -10,6 +10,27 @@ import {
 	type ClientErrorCode
 } from './errors';
 import type { DeskActivityEvent, DeskState, DeskTurn, PulseResponse } from './desk/types';
+import { filterQuery } from './architecture/format';
+import type {
+	ArchitectureMap,
+	AskResponse,
+	DecisionDetail,
+	DecisionFilter,
+	DecisionSummary,
+	Funnel,
+	Review,
+	ReviewInput,
+	ScanResponse,
+	ApplyBody,
+	LearningResponse,
+	LearningReview,
+	LockBody,
+	LockView,
+	SpendLike,
+	VersionList,
+	ConfigVersion,
+	LiveConfig
+} from './architecture/types';
 
 export { ApiError };
 export type { ApiErrorBody, ApiErrorCode, ClientErrorCode };
@@ -1041,6 +1062,33 @@ export const api = {
 	deskPulse: (signal?: AbortSignal) => request<PulseResponse>('/api/desk/pulse', { signal, timeoutMs: 30_000 }),
 	/** The plan card's "Send to Pilot": a preview, confirmed like any other. */
 	deskPilot: (planId: string) => post<PreviewDto>(`/api/desk/plans/${encodeURIComponent(planId)}/pilot`),
+	architectureMap: (signal?: AbortSignal) => request<ArchitectureMap>('/api/architecture/map', { signal }),
+	/** The free council scan (no LLM); a full watchlist can take 10-30 s. */
+	architectureScan: () => post<ScanResponse>('/api/architecture/scan', undefined, { timeoutMs: 120_000 }),
+	architectureDecisions: (filter: DecisionFilter = {}, signal?: AbortSignal) =>
+		request<{ decisions: DecisionSummary[] }>(`/api/architecture/decisions?${filterQuery(filter)}`, { signal }),
+	architectureDecision: (id: string, signal?: AbortSignal) =>
+		request<DecisionDetail>(`/api/architecture/decisions/${encodeURIComponent(id)}`, { signal }),
+	architectureFunnel: (range: { from_ms?: number; to_ms?: number } = {}, signal?: AbortSignal) =>
+		request<Funnel>(`/api/architecture/funnel?${filterQuery(range)}`, { signal }),
+	architectureReview: (id: string, review: ReviewInput) =>
+		put<{ review: Review }>(`/api/architecture/decisions/${encodeURIComponent(id)}/review`, review),
+	/** "Ask Friday": one paid Desk turn on a waiting decision. */
+	architectureAsk: (id: string) =>
+		post<AskResponse>(`/api/architecture/decisions/${encodeURIComponent(id)}/ask`, undefined, { timeoutMs: 320_000 }),
+	architectureVersions: (signal?: AbortSignal) => request<VersionList>('/api/architecture/versions', { signal }),
+	architectureLearning: (signal?: AbortSignal) => request<LearningResponse>('/api/architecture/learning', { signal }),
+	/** Claude reviews the track record (paid, about $0.03). */
+	architectureReviewRun: () =>
+		post<{ review: LearningReview; spend: SpendLike | null }>('/api/architecture/learning/review', undefined, { timeoutMs: 180_000 }),
+	/** A wrong TOTP code is a 401 that is an answer, not a lost session. */
+	architectureApply: (body: ApplyBody) =>
+		post<{ version: ConfigVersion | number; live: LiveConfig }>('/api/architecture/learning/apply', body, { keepOn401: true }),
+	architectureRollback: (version: number, body: { confirm_loosen?: boolean; totp?: string } = {}) =>
+		post<{ version: ConfigVersion | number; live: LiveConfig }>(`/api/architecture/versions/${version}/rollback`, body, { keepOn401: true }),
+	architectureLock: (signal?: AbortSignal) => request<LockView>('/api/architecture/account-lock', { signal }),
+	architectureSetLock: (body: LockBody) => put<LockView>('/api/architecture/account-lock', body, { keepOn401: true }),
+
 	note: (id: number, signal?: AbortSignal) => request<NoteText>(`/api/notes/${id}`, { signal }),
 
 	audit: (opts: { limit?: number; beforeId?: number | null } = {}, signal?: AbortSignal) => {
