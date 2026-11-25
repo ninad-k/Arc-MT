@@ -212,15 +212,13 @@ throw new Error(r.join(','));`;
 			return await new Promise<string>((resolve) => {
 				setTimeout(() => resolve('timeout'), 20_000);
 				// Test harness: the sender is checked by identity (`e.source`).
-				// nosemgrep: javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation
-				window.addEventListener('message', (e) => {
+				window.addEventListener('message', (e) => { // nosemgrep: javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation
 					if (e.source !== f.contentWindow) return;
 					if (e.data?.type === 'loaded') {
 						const buf = new Uint8Array(bytes).buffer;
 						const overlay = probe.replace('APP_BLOB', JSON.stringify(appBlob));
 						// The sandbox frame has an opaque origin, so it cannot be named.
-						// nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
-						f.contentWindow!.postMessage({ type: 'load', format: 'glb', bytes: buf, overlay }, '*', [buf]);
+						f.contentWindow!.postMessage({ type: 'load', format: 'glb', bytes: buf, overlay }, '*', [buf]); // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
 					}
 					if (e.data?.type === 'error') resolve(e.data.message);
 					if (e.data?.type === 'ready') resolve('ready without the probe');

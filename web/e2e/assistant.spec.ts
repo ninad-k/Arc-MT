@@ -147,8 +147,7 @@ test('messages that do not come from the model frame are ignored', async ({ page
 	const stage = page.getByTestId('model-stage');
 	await expect(stage.getByText(/tris/)).toBeVisible({ timeout: 15_000 });
 	// A forged message on purpose: the test checks that the app ignores it.
-	// nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
-	await page.evaluate(() => window.postMessage({ type: 'error', message: 'forged' }, '*'));
+	await page.evaluate(() => window.postMessage({ type: 'error', message: 'forged' }, '*')); // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
 	await page.waitForTimeout(300);
 	await expect(stage.getByRole('alert')).toHaveCount(0);
 });

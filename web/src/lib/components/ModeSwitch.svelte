@@ -57,7 +57,7 @@
 			aria-pressed={on}
 			disabled={lock !== null && !on}
 			title={o.title}
-			class="px-2.5 text-2xs font-medium tracking-wider uppercase transition-colors disabled:cursor-not-allowed max-[420px]:px-1.5 max-[420px]:tracking-normal {on
+			class="px-2.5 text-2xs font-medium tracking-wider uppercase transition-colors disabled:cursor-not-allowed max-[420px]:px-1.5 max-[420px]:tracking-normal lg:max-xl:px-1 lg:max-xl:tracking-normal {on
 				? 'bg-accent/15 text-accent'
 				: 'text-mute hover:text-ink'}"
 			onclick={() => choose(o.id)}
