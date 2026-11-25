@@ -59,6 +59,12 @@ pub enum AuditKind {
     NoteCaptured,
     /// A 3D model was built (or changed) in Assistant mode.
     ModelBuilt,
+    /// A Desk specialist reported a finding (spec-nimbus-desk).
+    DeskFinding,
+    /// Sentinel approved or vetoed a Desk trade plan.
+    SentinelVerdict,
+    /// Pilot turned an approved plan into a trade preview (or was refused).
+    PilotPreview,
 }
 
 impl AuditKind {
@@ -92,6 +98,9 @@ impl AuditKind {
             AuditKind::ClaudeUsage => "claude_usage",
             AuditKind::NoteCaptured => "note_captured",
             AuditKind::ModelBuilt => "model_built",
+            AuditKind::DeskFinding => "desk_finding",
+            AuditKind::SentinelVerdict => "sentinel_verdict",
+            AuditKind::PilotPreview => "pilot_preview",
         }
     }
 }
@@ -211,6 +220,23 @@ impl Audit {
              WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
         )
         .bind(before_id)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_from).collect()
+    }
+
+    /// The newest rows written for one persona (Desk mode's journal is its `desk` rows).
+    pub async fn recent_for_persona(
+        &self,
+        persona: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<AuditRow>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, session_id, kind, payload, persona FROM audit \
+             WHERE persona = ?1 ORDER BY id DESC LIMIT ?2",
+        )
+        .bind(persona)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;

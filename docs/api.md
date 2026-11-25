@@ -430,6 +430,31 @@ Same login rules as the other routes.
   - `note_captured`;
   - `model_built`.
 
+## Desk mode (ADR-0023)
+
+Same login rules as the other routes. See [desk-mode.md](desk-mode.md).
+
+- `POST /api/chat` also takes `"mode": "desk"`. The response adds
+  `"desk": {"findings": [...], "chart": {...} | null, "plans": [...]}`, and `preview` when Pilot made one.
+  - A finding is `{"agent", "summary", "data", "sources": [{"name", "what", "at"}], "notes"}`; a
+    figure with no data is `null`.
+  - A plan is `{"id", "plan": {"symbol", "broker_symbol", "side", "entry", "stop", "target", "volume",
+    "risk_percent", "risk_amount", "currency", "sizing_error"}, "verdict": {"decision": "approved" |
+    "vetoed", "reasons", "warnings"?}, "issued_ms", "expires_ms", "used"}`.
+  - A chart is `{"symbol", "timeframe", "digits", "bars", "levels": [{"kind", "price", "to", "label"}],
+    "band": {"low", "high", "bars_ahead", "label"} | null}`.
+  - `spend` is set when Friday's provider is Claude. At the Desk cap the reply says so and nothing is sent.
+- `GET /api/desk/state` → `{"enabled", "brain": {"provider", "model", "available", "reason", "metered"},
+  "session", "calendar": {"today", "months": [{"year", "month", "marks"}], "next_fomc"}, "seats",
+  "signals", "plans", "journal", "spend", "finnhub", "rules", "kill_switch"}`. No bridge call.
+- `GET /api/desk/pulse` → `{"quotes": [{"symbol", "price", "change_pct"}], "at"}` for the watchlist and
+  `[desk] indices`. Market rate budget.
+- `POST /api/desk/plans/{id}/pilot` → a `PreviewDto`, confirmed with `POST /api/confirm/{token}`.
+  `404` for an unknown plan; `422` (`gate_rejected`) for a vetoed, used or expired plan or a preview larger
+  than approved; the gate's own codes (for example `423` with the kill switch) otherwise.
+- New audit kinds: `desk_finding`, `sentinel_verdict`, `pilot_preview`. Desk rows carry persona `desk`.
+- Outbound connections: Finnhub data calls are logged with purpose `desk finnhub`.
+
 ## Outbound connections
 
 `GET /api/egress?since=N` (same login rules as `/api/audit`) lists the requests the backend made to
@@ -464,6 +489,7 @@ Client messages are ignored (keep them under 1 KB).
 {"type":"preview_expired","token":"…"}
 {"type":"trade_executed","preview_id":"…","results":[…]}
 {"type":"positions_changed"}
+{"type":"desk_activity","agent":"oracle","state":"done","summary":"…","at_ms":1795528000000}
 ```
 
 If the server could not keep up and dropped events for a socket, it sends

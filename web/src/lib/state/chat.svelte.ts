@@ -1,6 +1,7 @@
 import { api, type ChatMode, type ChatResponse, type CitedNote, type ModelRef, type ToolCall } from '#lib/api.ts';
 import { describeError, toApiError } from '#lib/errors.ts';
 import { assistant } from './assistant.svelte';
+import { desk } from './desk.svelte';
 import { mode } from './mode.svelte';
 import { orb } from './orb.svelte';
 import { persona } from './persona.svelte';
@@ -39,7 +40,8 @@ interface Thread {
 class ChatStore {
 	threads = $state<Record<ChatMode, Thread>>({
 		trading: { messages: [], sessionId: null, pending: false },
-		assistant: { messages: [], sessionId: null, pending: false }
+		assistant: { messages: [], sessionId: null, pending: false },
+		desk: { messages: [], sessionId: null, pending: false }
 	});
 
 	private nextId = 1;
@@ -103,7 +105,9 @@ class ChatStore {
 			const res = await api.chat({
 				message,
 				...(thread.sessionId ? { session_id: thread.sessionId } : {}),
-				...(turnMode === 'assistant'
+				...(turnMode === 'desk'
+					? { mode: 'desk' as const }
+					: turnMode === 'assistant'
 					? {
 							mode: 'assistant' as const,
 							...(assistant.stageModel ? { stage_model: { id: assistant.stageModel.id } } : {})
@@ -126,6 +130,7 @@ class ChatStore {
 				models: res.models ?? []
 			});
 			if (turnMode === 'assistant') assistant.onResponse(res);
+			if (turnMode === 'desk') desk.onResponse(res);
 			orb.set('idle');
 			return res;
 		} catch (e) {

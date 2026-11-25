@@ -34,6 +34,14 @@ pub enum Event {
     SymbolMapChanged {
         broker: String,
     },
+    /// A Desk seat started or finished work (spec-nimbus-desk). `state` is `working`, `done` or
+    /// `error`; `summary` is the finding's one-line summary when done.
+    DeskActivity {
+        agent: String,
+        state: String,
+        summary: Option<String>,
+        at_ms: i64,
+    },
 }
 
 const CAPACITY: usize = 64;

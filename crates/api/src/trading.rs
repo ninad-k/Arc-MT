@@ -530,7 +530,10 @@ impl Trading {
             if matches!(intent, Intent::Confirm | Intent::Cancel) && self.has_live(req.session) {
                 return Err(TradingError::UserIsAnswering);
             }
-            intent::cross_check(intent, &req.action).map_err(TradingError::IntentMismatch)?;
+            // A risk-sized proposal (Desk mode's Pilot) is compared with the risk the user said,
+            // not with a volume; with `risk_percent: None` this is the plain cross-check.
+            intent::cross_check_sized(intent, &req.action, req.risk_percent)
+                .map_err(TradingError::IntentMismatch)?;
         }
 
         // The action's symbols were resolved for this account a moment ago.

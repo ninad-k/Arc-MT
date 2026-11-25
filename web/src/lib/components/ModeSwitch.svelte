@@ -4,12 +4,14 @@
 	import { assistant } from '#lib/state/assistant.svelte.ts';
 	import { preview } from '#lib/state/preview.svelte.ts';
 	import { chat } from '#lib/state/chat.svelte.ts';
+	import { desk } from '#lib/state/desk.svelte.ts';
 
 	let { class: klass = '' }: { class?: string } = $props();
 
 	const options: { id: ChatMode; label: string; title: string }[] = [
 		{ id: 'trading', label: 'Trading', title: 'Jarvis or Friday on MetaTrader 5' },
-		{ id: 'assistant', label: 'Assistant', title: 'Jarvis on Claude: 3D models, your notes, "remember that". No trading.' }
+		{ id: 'assistant', label: 'Assistant', title: 'Jarvis on Claude: 3D models, your notes, "remember that". No trading.' },
+		{ id: 'desk', label: 'Desk', title: 'Nimbus Desk: Friday and eight specialists. Trades only through Sentinel and your confirmation.' }
 	];
 
 	/** An open trade confirmation keeps the mode where it is. A reply in flight does not: it
@@ -23,12 +25,16 @@
 			void assistant.loadStatus();
 			void assistant.loadRecent();
 		}
+		if (next === 'desk') void desk.load();
 	}
 
 	function onkeydown(e: KeyboardEvent) {
 		if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
 		e.preventDefault();
-		choose(mode.value === 'trading' ? 'assistant' : 'trading');
+		const ids = options.map((o) => o.id);
+		const i = ids.indexOf(mode.value);
+		const step = e.key === 'ArrowRight' ? 1 : ids.length - 1;
+		choose(ids[(i + step) % ids.length]);
 		const group = e.currentTarget as HTMLElement;
 		group.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')?.focus();
 	}

@@ -6,6 +6,9 @@
 	import { backend, status } from '#lib/state/hud.svelte.ts';
 	import { provider } from '#lib/state/provider.svelte.ts';
 
+	/** `readouts`: the persona, core, link and model lines in the corners (off inside the Desk ring). */
+	let { readouts = true }: { readouts?: boolean } = $props();
+
 	let host = $state<HTMLDivElement>();
 	let scene: OrbScene | undefined;
 	let fallback = $state(false);
@@ -83,6 +86,7 @@
 	</div>
 
 	<!-- HUD readouts: real data only. -->
+	{#if readouts}
 	<dl class="num pointer-events-none absolute top-2 left-3 hidden text-2xs leading-relaxed tracking-wider text-faint uppercase sm:block">
 		<div class="flex gap-2"><dt>Persona</dt><dd class="text-mute normal-case" data-testid="orb-persona">{persona.name}</dd></div>
 		<div class="flex gap-2"><dt>Core</dt><dd class="text-mute">{orb.state}</dd></div>
@@ -92,6 +96,7 @@
 		<div class="flex justify-end gap-2"><dt>LLM</dt><dd class="text-mute">{llm?.name ?? '—'}</dd></div>
 		<div class="flex justify-end gap-2"><dt>Model</dt><dd class="text-mute normal-case">{llm?.model ?? '—'}</dd></div>
 	</dl>
+	{/if}
 
 	<p
 		class="relative z-10 mt-auto mb-2 flex items-center gap-2 text-xs tracking-[0.22em] uppercase transition-colors sm:mb-4 sm:text-sm {orb.state ===

@@ -58,8 +58,8 @@
 
 	<div class="flex min-w-0 items-center gap-2">
 		<ModeSwitch />
-		<!-- Assistant mode is always Jarvis, so the persona choice belongs to Trading mode. -->
-		{#if !appMode.assistant}
+		<!-- Assistant mode is always Jarvis and Desk mode always Friday, so the persona choice belongs to Trading mode. -->
+		{#if !appMode.assistant && !appMode.desk}
 			<PersonaToggle />
 		{/if}
 	</div>

@@ -10,6 +10,13 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Added
 
+- Desk mode (Nimbus Desk, ADR-0023): Friday and eight specialists (Atlas, Capitol, Scout, Athena, Chartist, Oracle,
+  Sentinel, Pilot, Ledger) in a new `jarvis-desk` crate and `POST /api/chat {"mode": "desk"}`. Trades go only through
+  a one-time Sentinel approval, Pilot's preview and the usual confirmation. New endpoints `GET /api/desk/state`,
+  `GET /api/desk/pulse` and `POST /api/desk/plans/{id}/pilot`, a `desk_activity` event, a Finnhub data client
+  (insiders, basic financials, filings), a `[desk]` config section with its own monthly Claude cap, and the Desk HUD
+  in the web app (seat ring, market pulse, task queue, signal log, US session clock, calendar, agent load, chart,
+  plan cards, journal), with a mock for `pnpm dev:mock`.
 - Action gate (`jarvis-gate`): limits for lot size, open positions, daily loss, allowed symbols and trading hours, checked before every preview.
 - Previews with one-time confirmation tokens (15 seconds by default). Batch actions need a second confirmation that repeats the count.
 - Write commands in the `JarvisBridge` EA, run only on request: market and pending orders, position modify, close and partial close, and order cancel. The EA refuses real accounts unless `InpAllowReal` is set, refuses writes while Algo Trading is off, and caches the last 64 write replies by request id.

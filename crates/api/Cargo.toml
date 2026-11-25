@@ -32,6 +32,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15.7"
 jarvis-bridge-client = { version = "0.1.0", path = "../bridge-client" }
+jarvis-desk = { version = "0.1.0", path = "../desk" }
 jarvis-gate = { version = "0.1.0", path = "../gate" }
 jarvis-llm = { version = "0.1.0", path = "../llm" }
 jarvis-market = { version = "0.1.0", path = "../market" }

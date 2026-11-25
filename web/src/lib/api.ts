@@ -9,6 +9,7 @@ import {
 	type ApiErrorCode,
 	type ClientErrorCode
 } from './errors';
+import type { DeskActivityEvent, DeskState, DeskTurn, PulseResponse } from './desk/types';
 
 export { ApiError };
 export type { ApiErrorBody, ApiErrorCode, ClientErrorCode };
@@ -251,7 +252,7 @@ export interface WatchlistResponse {
 // ---- Chat, previews, confirmation ----------------------------------------
 
 /** Which side of the app a chat turn is for (spec-assistant-mode). */
-export type ChatMode = 'trading' | 'assistant';
+export type ChatMode = 'trading' | 'assistant' | 'desk';
 
 export interface ChatRequest {
 	session_id?: string;
@@ -328,8 +329,10 @@ export interface ChatResponse {
 	models?: ModelRef[];
 	/** Notes written by "remember that ..." in this turn (Assistant mode). */
 	captured?: CapturedNote[];
-	/** This month's Claude spending (Assistant mode). */
+	/** This month's Claude spending (Assistant mode, and Desk mode on Claude). */
 	spend?: SpendStatus | null;
+	/** Desk mode: what the seats found, the chart Chartist drew and Sentinel's plans. */
+	desk?: DeskTurn | null;
 }
 
 /** A 3D model built by the assistant. */
@@ -841,6 +844,7 @@ export type WsEvent =
 	| { type: 'positions_changed' }
 	| { type: 'settings_changed' }
 	| { type: 'symbol_map_changed'; broker?: string }
+	| DeskActivityEvent
 	| AlertTriggeredEvent;
 
 // ---- Transport -----------------------------------------------------------
@@ -956,7 +960,7 @@ export const api = {
 	/** LLM turns can be slow on local models, so allow a generous timeout. */
 	chat: (body: ChatRequest, signal?: AbortSignal) =>
 		// Assistant turns that build a 3D model can take up to the server's 300 s limit.
-		post<ChatResponse>('/api/chat', body, { signal, timeoutMs: body.mode === 'assistant' ? 320_000 : 180_000 }),
+		post<ChatResponse>('/api/chat', body, { signal, timeoutMs: body.mode === 'trading' || body.mode === undefined ? 180_000 : 320_000 }),
 
 	confirm: (token: string) =>
 		post<ConfirmResponse>(`/api/confirm/${encodeURIComponent(token)}`, undefined, {
@@ -997,6 +1001,10 @@ export const api = {
 	modelFromImage: (image: Blob, note: string) =>
 		postBytes<ImageBuild>(`/api/models/from-image?note=${encodeURIComponent(note.slice(0, 1000))}`, image, 320_000),
 	rescanNotes: () => post<NotesGraph>('/api/notes/rescan'),
+	deskState: (signal?: AbortSignal) => request<DeskState>('/api/desk/state', { signal }),
+	deskPulse: (signal?: AbortSignal) => request<PulseResponse>('/api/desk/pulse', { signal, timeoutMs: 30_000 }),
+	/** The plan card's "Send to Pilot": a preview, confirmed like any other. */
+	deskPilot: (planId: string) => post<PreviewDto>(`/api/desk/plans/${encodeURIComponent(planId)}/pilot`),
 	note: (id: number, signal?: AbortSignal) => request<NoteText>(`/api/notes/${id}`, { signal }),
 
 	audit: (opts: { limit?: number; beforeId?: number | null } = {}, signal?: AbortSignal) => {

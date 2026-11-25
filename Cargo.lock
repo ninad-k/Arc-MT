@@ -1548,6 +1548,7 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "jarvis-bridge-client",
+ "jarvis-desk",
  "jarvis-gate",
  "jarvis-llm",
  "jarvis-market",
@@ -1598,6 +1599,17 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zeromq",
+]
+
+[[package]]
+name = "jarvis-desk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jarvis-market",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

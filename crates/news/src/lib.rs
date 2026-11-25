@@ -20,6 +20,7 @@ mod types;
 
 mod alphavantage;
 mod finnhub;
+mod finnhub_data;
 mod http;
 mod instrument;
 mod relevance;
@@ -29,6 +30,9 @@ mod text;
 pub use alphavantage::AlphaVantage;
 pub use error::NewsError;
 pub use finnhub::Finnhub;
+pub use finnhub_data::{
+    BasicFinancials, CongressionalTrade, FinnhubData, InsiderTransaction, SecFiling,
+};
 pub use http::DEFAULT_TIMEOUT;
 pub use relevance::{Mentions, currency_terms, directed_tone, is_relevant, mentions};
 pub use service::{DEFAULT_STALE_MAX, DEFAULT_TTL, NewsService, label};

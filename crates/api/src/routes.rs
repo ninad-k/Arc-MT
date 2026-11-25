@@ -142,6 +142,7 @@ pub fn app(state: AppState) -> Router {
                 crate::models3d::MAX_IMAGE_BYTES + 1024,
             )),
         )
+        .route("/api/desk/state", get(crate::desk_routes::state))
         .route(
             "/api/assistant/status",
             get(crate::assistant_routes::status),
@@ -156,6 +157,16 @@ pub fn app(state: AppState) -> Router {
     let slow = Router::new()
         .route("/api/chat", post(chat).layer(budget(Budget::Chat)))
         .route("/api/confirm/{token}", post(confirm))
+        // Desk mode (spec-nimbus-desk): Pilot asks for a preview like the Prepare-trade button;
+        // the pulse reads two bridge calls per symbol.
+        .route(
+            "/api/desk/plans/{id}/pilot",
+            post(crate::desk_routes::pilot),
+        )
+        .route(
+            "/api/desk/pulse",
+            get(crate::desk_routes::pulse).layer(budget(Budget::Market)),
+        )
         // Claude builds from a picture: as slow as a chat turn, with the chat budget.
         .route(
             "/api/models/from-image",
@@ -759,8 +770,11 @@ struct ChatResponseBody {
     models: Vec<crate::assistant::ModelRef>,
     /// Notes written in this turn by "remember that ..." (Assistant mode).
     captured: Vec<jarvis_notes::Captured>,
-    /// This month's Claude spending (Assistant mode).
+    /// This month's Claude spending (Assistant mode, and Desk mode on Claude).
     spend: Option<crate::spend::SpendStatus>,
+    /// Desk mode: `{findings, chart, plans}` (spec-nimbus-desk). Absent in the other modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desk: Option<Value>,
 }
 
 async fn chat(
@@ -799,9 +813,12 @@ async fn chat(
             let stage = req.stage_model.map(|s| s.id);
             return assistant_chat(&state, session_id, message, req.voice, stage).await;
         }
+        "desk" => {
+            return desk_chat(&state, session.as_ref(), session_id, message, req.voice).await;
+        }
         other => {
             return Err(ApiError::BadRequest(format!(
-                "unknown mode '{other}' (use \"trading\" or \"assistant\")"
+                "unknown mode '{other}' (use \"trading\", \"assistant\" or \"desk\")"
             )));
         }
     }
@@ -873,6 +890,7 @@ async fn chat(
         models: vec![],
         captured: vec![],
         spend: None,
+        desk: None,
     }))
 }
 
@@ -905,6 +923,7 @@ async fn assistant_chat(
         models: vec![],
         captured: vec![],
         spend: Some(assistant.spend().status(chrono::Utc::now())),
+        desk: None,
     };
     // Without a usable provider nothing is sent anywhere; the reply says how to set it up.
     let provider = match state.assistant_provider() {
@@ -963,6 +982,103 @@ async fn assistant_chat(
         models: outcome.models,
         captured: outcome.captured,
         spend: Some(outcome.spend),
+        desk: None,
+    }))
+}
+
+/// `POST /api/chat` with `mode: "desk"`: Friday and the specialists (spec-nimbus-desk).
+async fn desk_chat(
+    state: &AppState,
+    session: Option<&crate::auth::Session>,
+    session_id: Option<Uuid>,
+    message: &str,
+    voice: bool,
+) -> Result<Json<ChatResponseBody>, ApiError> {
+    let desk = state
+        .desk()
+        .ok_or_else(|| {
+            ApiError::BadRequest("Desk mode is turned off ([desk] enabled = false)".into())
+        })?
+        .clone();
+    let config = &state.config().desk;
+    let model = state
+        .provider(&config.provider)
+        .map(|e| e.config.model.clone());
+    let brain = json!({ "provider": config.provider, "model": model });
+    let (provider, metered) = match state.desk_provider() {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(Json(ChatResponseBody {
+                session_id: session_id.unwrap_or_else(Uuid::new_v4),
+                reply: format!(
+                    "Desk mode is not set up yet ({reason}). Set ANTHROPIC_API_KEY in the server's \
+                     environment or .env file and restart, or point [desk] provider at a local model."
+                ),
+                provider: config.provider.clone(),
+                persona: crate::desk::DESK_PERSONA.to_owned(),
+                tool_calls: vec![],
+                preview: None,
+                notes: vec![],
+                mode: "desk",
+                brain,
+                models: vec![],
+                captured: vec![],
+                spend: Some(desk.spend().status(chrono::Utc::now())),
+                desk: Some(json!({ "findings": [], "chart": null, "plans": [] })),
+            }));
+        }
+    };
+    if state.mode_mismatch() {
+        return Err(ApiError::ModeMismatch);
+    }
+    let settings = state.user_settings(session).await;
+    let resolver = state.resolver_for(&settings);
+    let user = crate::desk::DeskUser {
+        intent: state.agent().tools().parse_intent(message),
+        resolver,
+        watchlist: settings.watchlist.clone(),
+    };
+    // A task of its own, so the turn (and its spending record) finishes even if this request
+    // is dropped by the time limit or a closed connection.
+    let turn = {
+        let desk = desk.clone();
+        let message = message.to_owned();
+        tokio::spawn(async move {
+            desk.run_turn(
+                provider.as_ref(),
+                metered,
+                &user,
+                session_id,
+                &message,
+                voice,
+            )
+            .await
+        })
+    };
+    let outcome = match turn.await.map_err(|_| ApiError::Internal)? {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(provider = %config.provider, "desk LLM call failed: {e}");
+            return Err(e.into());
+        }
+    };
+    Ok(Json(ChatResponseBody {
+        session_id: outcome.session_id,
+        reply: outcome.reply,
+        provider: config.provider.clone(),
+        persona: crate::desk::DESK_PERSONA.to_owned(),
+        tool_calls: outcome.tool_calls,
+        preview: outcome.preview,
+        notes: vec![],
+        mode: "desk",
+        brain,
+        models: vec![],
+        captured: vec![],
+        spend: outcome.spend,
+        desk: Some(
+            json!({ "findings": outcome.findings, "chart": outcome.chart,
+                           "plans": outcome.plans }),
+        ),
     }))
 }
 

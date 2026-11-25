@@ -3,6 +3,7 @@
 	import { chat } from '#lib/state/chat.svelte.ts';
 	import { mode } from '#lib/state/mode.svelte.ts';
 	import { assistant } from '#lib/state/assistant.svelte.ts';
+	import { desk } from '#lib/state/desk.svelte.ts';
 
 	let { class: klass = '' }: { class?: string } = $props();
 	const providers = $derived(provider.providers);
@@ -18,6 +19,18 @@
 			title="Assistant mode answers with this model (set in [assistant] of the server config)"
 		>
 			{brain ? `${brain.provider} · ${brain.model ?? '?'}` : 'Claude'}
+		</span>
+	</div>
+{:else if mode.desk}
+	<!-- Desk mode answers with the model in [desk] of the server config. -->
+	{@const brain = desk.state?.brain}
+	<div class="flex min-w-0 items-center gap-2 {klass}" data-testid="brain-badge">
+		<span class="hud-title max-[420px]:sr-only lg:max-xl:sr-only">Brain</span>
+		<span
+			class="num flex h-7 min-w-0 flex-1 items-center truncate border border-line bg-panel/70 px-2 text-2xs text-ink lg:w-44 lg:min-w-28 lg:flex-initial xl:w-56"
+			title="Desk mode answers with this model (set in [desk] of the server config)"
+		>
+			{brain ? `${brain.provider} · ${brain.model ?? '?'}` : '—'}
 		</span>
 	</div>
 {:else}

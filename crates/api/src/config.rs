@@ -74,6 +74,9 @@ pub struct Config {
     /// `[assistant]`: Assistant mode (Claude, notes, captures, 3D models).
     #[serde(default)]
     pub assistant: AssistantConfig,
+    /// `[desk]`: Desk mode, the nine-agent Nimbus Desk (spec-nimbus-desk).
+    #[serde(default)]
+    pub desk: DeskConfig,
 }
 
 /// `[assistant]` (spec-assistant-mode). On by default; it needs the provider named here to be
@@ -229,6 +232,193 @@ impl AssistantConfig {
         if !plain {
             bail!("assistant.captures_dir must be one plain folder name, like \"captures\"");
         }
+        Ok(())
+    }
+}
+
+/// `[desk]` (spec-nimbus-desk, ADR-0023). On by default; Friday answers on the provider named
+/// here, and Desk mode says so when it is not usable.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeskConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// An `[[llm.providers]]` name. Claude by default; any kind works.
+    #[serde(default = "default_assistant_provider")]
+    pub provider: String,
+    /// `output_config.effort` for Friday's turns (`low`..`max`; Claude only).
+    #[serde(default = "default_desk_effort")]
+    pub effort: String,
+    /// Desk mode stops calling a Claude provider once this month's cost reaches it.
+    #[serde(default = "default_monthly_budget")]
+    pub monthly_budget_usd: f64,
+    #[serde(default = "default_price_input")]
+    pub price_input_per_mtok: f64,
+    #[serde(default = "default_price_output")]
+    pub price_output_per_mtok: f64,
+    #[serde(default = "default_price_cache_read")]
+    pub price_cache_read_per_mtok: f64,
+    #[serde(default = "default_price_cache_write")]
+    pub price_cache_write_per_mtok: f64,
+    /// The file that keeps this month's Desk spending.
+    #[serde(default = "default_desk_spend_file")]
+    pub spend_file: PathBuf,
+    /// US stocks Scout scans (with the watchlist). Sentinel treats them as US-session symbols.
+    #[serde(default)]
+    pub universe: Vec<String>,
+    /// Index symbols Atlas reports (canonical names).
+    #[serde(default = "default_desk_indices")]
+    pub indices: Vec<String>,
+    /// Sentinel: percent of equity at risk per trade (the gate's `max_risk_percent` still applies).
+    #[serde(default = "default_desk_risk")]
+    pub risk_percent: f64,
+    /// Sentinel: open Desk positions at most.
+    #[serde(default = "default_desk_positions")]
+    pub max_open_positions: u32,
+    /// Sentinel: no new trades this many minutes before the US close.
+    #[serde(default = "default_desk_close_buffer")]
+    pub no_new_trades_before_close_minutes: i64,
+    /// Extra FOMC decision days, `YYYY-MM-DD` (the 2026 schedule is built in).
+    #[serde(default)]
+    pub fomc_dates: Vec<String>,
+    /// Extra NYSE holidays, `YYYY-MM-DD` (2026 and 2027 are built in).
+    #[serde(default)]
+    pub holidays: Vec<String>,
+    /// The environment variable that holds the Finnhub key (insiders, fundamentals, filings).
+    #[serde(default = "default_finnhub_env")]
+    pub finnhub_key_env: String,
+    /// Movers Scout reports.
+    #[serde(default = "default_scout_top")]
+    pub scout_top: usize,
+}
+
+fn default_desk_effort() -> String {
+    "medium".to_owned()
+}
+fn default_desk_spend_file() -> PathBuf {
+    PathBuf::from("data/desk-spend.json")
+}
+fn default_desk_indices() -> Vec<String> {
+    vec!["US500".to_owned(), "NAS100".to_owned()]
+}
+fn default_desk_risk() -> f64 {
+    0.5
+}
+fn default_desk_positions() -> u32 {
+    2
+}
+fn default_desk_close_buffer() -> i64 {
+    10
+}
+fn default_finnhub_env() -> String {
+    "FINNHUB_API_KEY".to_owned()
+}
+fn default_scout_top() -> usize {
+    8
+}
+
+impl Default for DeskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: default_assistant_provider(),
+            effort: default_desk_effort(),
+            monthly_budget_usd: default_monthly_budget(),
+            price_input_per_mtok: default_price_input(),
+            price_output_per_mtok: default_price_output(),
+            price_cache_read_per_mtok: default_price_cache_read(),
+            price_cache_write_per_mtok: default_price_cache_write(),
+            spend_file: default_desk_spend_file(),
+            universe: Vec::new(),
+            indices: default_desk_indices(),
+            risk_percent: default_desk_risk(),
+            max_open_positions: default_desk_positions(),
+            no_new_trades_before_close_minutes: default_desk_close_buffer(),
+            fomc_dates: Vec::new(),
+            holidays: Vec::new(),
+            finnhub_key_env: default_finnhub_env(),
+            scout_top: default_scout_top(),
+        }
+    }
+}
+
+impl DeskConfig {
+    pub fn prices(&self) -> crate::spend::Prices {
+        crate::spend::Prices {
+            input: self.price_input_per_mtok,
+            output: self.price_output_per_mtok,
+            cache_read: self.price_cache_read_per_mtok,
+            cache_write: self.price_cache_write_per_mtok,
+        }
+    }
+
+    pub fn rules(&self) -> jarvis_desk::sentinel::Rules {
+        jarvis_desk::sentinel::Rules {
+            risk_percent: self.risk_percent,
+            max_open_positions: self.max_open_positions,
+            no_new_trades_before_close_minutes: self.no_new_trades_before_close_minutes,
+        }
+    }
+
+    fn dates(list: &[String], name: &str) -> anyhow::Result<Vec<chrono::NaiveDate>> {
+        list.iter()
+            .map(|d| {
+                chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d")
+                    .map_err(|_| anyhow!("desk.{name}: '{d}' is not a YYYY-MM-DD date"))
+            })
+            .collect()
+    }
+
+    pub fn fomc_days(&self) -> Vec<chrono::NaiveDate> {
+        Self::dates(&self.fomc_dates, "fomc_dates").unwrap_or_default()
+    }
+
+    pub fn exchange(&self) -> jarvis_desk::session::Exchange {
+        let mut x = jarvis_desk::session::Exchange::default();
+        x.holidays
+            .extend(Self::dates(&self.holidays, "holidays").unwrap_or_default());
+        x
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !EFFORTS.contains(&self.effort.as_str()) {
+            bail!("desk.effort must be one of {}", EFFORTS.join(", "));
+        }
+        let money = [
+            ("monthly_budget_usd", self.monthly_budget_usd),
+            ("price_input_per_mtok", self.price_input_per_mtok),
+            ("price_output_per_mtok", self.price_output_per_mtok),
+            ("price_cache_read_per_mtok", self.price_cache_read_per_mtok),
+            (
+                "price_cache_write_per_mtok",
+                self.price_cache_write_per_mtok,
+            ),
+        ];
+        for (name, value) in money {
+            if !(0.0..=100_000.0).contains(&value) {
+                bail!("desk.{name} must be between 0 and 100000");
+            }
+        }
+        if !(0.01..=5.0).contains(&self.risk_percent) {
+            bail!("desk.risk_percent must be between 0.01 and 5");
+        }
+        if !(1..=50).contains(&self.max_open_positions) {
+            bail!("desk.max_open_positions must be between 1 and 50");
+        }
+        if !(0..=390).contains(&self.no_new_trades_before_close_minutes) {
+            bail!("desk.no_new_trades_before_close_minutes must be between 0 and 390");
+        }
+        if !(1..=50).contains(&self.scout_top) {
+            bail!("desk.scout_top must be between 1 and 50");
+        }
+        if self.universe.len() > 50 {
+            bail!("desk.universe holds at most 50 symbols");
+        }
+        Self::dates(&self.fomc_dates, "fomc_dates")?;
+        Self::dates(&self.holidays, "holidays")?;
         Ok(())
     }
 }
@@ -1020,6 +1210,7 @@ impl Config {
         self.validate_trading()?;
         self.market.validate()?;
         self.assistant.validate()?;
+        self.desk.validate()?;
         Ok(())
     }
 

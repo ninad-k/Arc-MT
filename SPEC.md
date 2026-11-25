@@ -21,6 +21,7 @@ Status: Sprints 1–5 built; personas and settings added. Plans: [tasks/plan.md]
 | `voice` | Rust crate: whisper-rs STT with trading prompt, Piper TTS process | — |
 | `persona` | Rust crate: persona packs from `personas/*.toml`, validation, wake-phrase matching, system prompt composition | — |
 | `api` | Rust binary: Axum HTTP/WS, tool registry, agent loop, auth, audit log (SQLite) | all crates above |
+| `desk` | Rust crate: Nimbus Desk's nine agents as pure functions, the US session clock, the desk calendar, Sentinel's rules and one-time approvals (spec-nimbus-desk, ADR-0023) | `market` |
 | `web` | SvelteKit HUD (orb, watchlist, positions, transcript, confirm modal), PWA, later Tauri | `api` (HTTP/WS contract) |
 
 Build order: `mql5-bridge` + `bridge-client` → `llm` → `api` (read-only chat) → `gate` → `voice` + `web` HUD → auth/hardening → PWA/Tauri.

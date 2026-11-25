@@ -222,3 +222,28 @@ models_dir = "data/models3d"    # built models (the newest 50)
 spend_file = "data/assistant-spend.json"
 max_model_kb = 64
 captures_dir = "captures"       # "remember that ..." writes notes into [notes] dir / this folder
+
+# ---- Desk mode: Nimbus Desk, Friday and eight specialists (docs/desk-mode.md, ADR-0023).
+# Switch with Trading | Assistant | Desk in the top bar. Trades only through Sentinel, Pilot and the usual
+# confirmation. On Claude it costs money: Opus 5.5 is $4 per million input tokens and $20 per million output
+# tokens; a desk question is about $0.06-0.12 (estimate). Point provider at a local model to run it for free.
+# FINNHUB_API_KEY in .env (free tier) adds insiders, fundamentals and filings.
+[desk]
+enabled = true
+provider = "claude"             # an [[llm.providers]] name; any kind works, only Claude is metered
+effort = "medium"               # low | medium | high | xhigh | max (Claude only)
+monthly_budget_usd = 20.0       # nothing is sent to Claude once this month's Desk cost reaches it
+price_input_per_mtok = 4.0
+price_output_per_mtok = 20.0
+price_cache_read_per_mtok = 0.2
+price_cache_write_per_mtok = 5.0
+spend_file = "data/desk-spend.json"
+universe = []                   # US stocks Scout scans with the watchlist, e.g. ["NVDA", "AAPL"]
+indices = ["US500", "NAS100"]   # Atlas and the market pulse
+risk_percent = 0.5              # Sentinel: percent of equity at risk per trade
+max_open_positions = 2          # Sentinel: open Desk positions at most
+no_new_trades_before_close_minutes = 10
+fomc_dates = []                 # extra FOMC decision days, "YYYY-MM-DD" (2026 is built in)
+holidays = []                   # extra NYSE holidays (2026 and 2027 are built in)
+finnhub_key_env = "FINNHUB_API_KEY"
+scout_top = 8
