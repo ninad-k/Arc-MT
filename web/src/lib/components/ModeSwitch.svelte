@@ -8,10 +8,11 @@
 
 	let { class: klass = '' }: { class?: string } = $props();
 
-	const options: { id: ChatMode; label: string; title: string }[] = [
-		{ id: 'trading', label: 'Trading', title: 'Jarvis or Friday on MetaTrader 5' },
-		{ id: 'assistant', label: 'Assistant', title: 'Jarvis on Claude: 3D models, your notes, "remember that". No trading.' },
-		{ id: 'desk', label: 'Desk', title: 'Nimbus Desk: Friday and eight specialists. Trades only through Sentinel and your confirmation.' }
+	/** `short`: the label between lg and 2xl, where the one-row top bar is tightest. */
+	const options: { id: ChatMode; label: string; short: string; title: string }[] = [
+		{ id: 'trading', label: 'Trading', short: 'Trade', title: 'Jarvis or Friday on MetaTrader 5' },
+		{ id: 'assistant', label: 'Assistant', short: 'Assist', title: 'Jarvis on Claude: 3D models, your notes, "remember that". No trading.' },
+		{ id: 'desk', label: 'Desk', short: 'Desk', title: 'Nimbus Desk: Friday and eight specialists. Trades only through Sentinel and your confirmation.' }
 	];
 
 	/** An open trade confirmation keeps the mode where it is. A reply in flight does not: it
@@ -57,12 +58,13 @@
 			aria-pressed={on}
 			disabled={lock !== null && !on}
 			title={o.title}
-			class="px-2.5 text-2xs font-medium tracking-wider uppercase transition-colors disabled:cursor-not-allowed max-[420px]:px-1.5 max-[420px]:tracking-normal lg:max-xl:px-1 lg:max-xl:tracking-normal {on
+			aria-label={o.label}
+			class="px-2.5 text-2xs font-medium tracking-wider uppercase transition-colors disabled:cursor-not-allowed max-[420px]:px-1.5 max-[420px]:tracking-normal lg:max-xl:px-1 xl:max-2xl:px-1.5 lg:max-2xl:tracking-normal {on
 				? 'bg-accent/15 text-accent'
 				: 'text-mute hover:text-ink'}"
 			onclick={() => choose(o.id)}
 		>
-			{o.label}
+			<span class="lg:max-2xl:hidden">{o.label}</span><span class="hidden lg:max-2xl:inline" aria-hidden="true">{o.short}</span>
 		</button>
 	{/each}
 </div>
