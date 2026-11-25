@@ -77,6 +77,9 @@ pub struct Config {
     /// `[desk]`: Desk mode, the nine-agent Nimbus Desk (spec-nimbus-desk).
     #[serde(default)]
     pub desk: DeskConfig,
+    /// The architecture page's learning review on Claude (spec-architecture-page).
+    #[serde(default)]
+    pub learning: LearningConfig,
     /// `[alpaca]`: US stocks on an Alpaca paper account, a second venue (spec-alpaca).
     #[serde(default)]
     pub alpaca: AlpacaSection,
@@ -239,6 +242,64 @@ impl AssistantConfig {
     }
 }
 
+/// `[learning]`: the learning review. Claude reads statistics the code computed and explains
+/// and ranks proposals; nothing is applied without the trader. Runs only when asked.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LearningConfig {
+    pub enabled: bool,
+    /// An `[[llm.providers]]` name. Its model is replaced by `model` for Claude providers.
+    pub provider: String,
+    /// Empty = the provider's own model.
+    pub model: String,
+    pub monthly_budget_usd: f64,
+    pub price_input_per_mtok: f64,
+    pub price_output_per_mtok: f64,
+    pub price_cache_read_per_mtok: f64,
+    pub price_cache_write_per_mtok: f64,
+    pub spend_file: String,
+    pub max_tokens: u32,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "claude".into(),
+            model: "claude-sonnet-5-5".into(),
+            monthly_budget_usd: 2.0,
+            price_input_per_mtok: 2.0,
+            price_output_per_mtok: 10.0,
+            price_cache_read_per_mtok: 0.2,
+            price_cache_write_per_mtok: 2.5,
+            spend_file: "data/learning-spend.json".into(),
+            max_tokens: 3000,
+        }
+    }
+}
+
+impl LearningConfig {
+    pub fn prices(&self) -> crate::spend::Prices {
+        crate::spend::Prices {
+            input: self.price_input_per_mtok,
+            output: self.price_output_per_mtok,
+            cache_read: self.price_cache_read_per_mtok,
+            cache_write: self.price_cache_write_per_mtok,
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if !(self.monthly_budget_usd.is_finite() && (0.0..=50.0).contains(&self.monthly_budget_usd))
+        {
+            bail!("learning.monthly_budget_usd must be between 0 and 50");
+        }
+        if !(500..=8000).contains(&self.max_tokens) {
+            bail!("learning.max_tokens must be between 500 and 8000");
+        }
+        Ok(())
+    }
+}
+
 /// `[desk]` (spec-nimbus-desk, ADR-0023). On by default; Friday answers on the provider named
 /// here, and Desk mode says so when it is not usable.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -281,6 +342,24 @@ pub struct DeskConfig {
     /// Sentinel: no new trades this many minutes before the US close.
     #[serde(default = "default_desk_close_buffer")]
     pub no_new_trades_before_close_minutes: i64,
+    /// Sentinel: smallest reward to risk for a plan with a target (spec-architecture-page).
+    #[serde(default = "default_desk_min_rr")]
+    pub min_reward_risk: f64,
+    /// Council: smallest |score| that passes (spec-architecture-page).
+    #[serde(default = "default_desk_min_council")]
+    pub min_council_score: f64,
+    /// Council: members that must take a side.
+    #[serde(default = "default_desk_min_sides")]
+    pub min_non_neutral: usize,
+    /// Minutes between free council scans while the US market is open; 0 turns it off.
+    #[serde(default = "default_desk_scan_minutes")]
+    pub scan_every_minutes: u64,
+    /// The MT5 account the master bot may trade on (ADR-0025); 0 turns the lock off. The UI can
+    /// change it; this is the default.
+    #[serde(default = "default_master_account")]
+    pub master_account: u64,
+    #[serde(default = "default_master_broker")]
+    pub master_broker: String,
     /// Extra FOMC decision days, `YYYY-MM-DD` (the 2026 schedule is built in).
     #[serde(default)]
     pub fomc_dates: Vec<String>,
@@ -310,6 +389,30 @@ fn default_desk_risk() -> f64 {
 fn default_desk_positions() -> u32 {
     2
 }
+fn default_desk_min_rr() -> f64 {
+    1.5
+}
+
+fn default_desk_min_council() -> f64 {
+    0.30
+}
+
+fn default_desk_min_sides() -> usize {
+    3
+}
+
+fn default_desk_scan_minutes() -> u64 {
+    15
+}
+
+fn default_master_account() -> u64 {
+    53_107_904
+}
+
+fn default_master_broker() -> String {
+    "IC Markets".into()
+}
+
 fn default_desk_close_buffer() -> i64 {
     10
 }
@@ -337,6 +440,12 @@ impl Default for DeskConfig {
             risk_percent: default_desk_risk(),
             max_open_positions: default_desk_positions(),
             no_new_trades_before_close_minutes: default_desk_close_buffer(),
+            min_reward_risk: default_desk_min_rr(),
+            min_council_score: default_desk_min_council(),
+            min_non_neutral: default_desk_min_sides(),
+            scan_every_minutes: default_desk_scan_minutes(),
+            master_account: default_master_account(),
+            master_broker: default_master_broker(),
             fomc_dates: Vec::new(),
             holidays: Vec::new(),
             finnhub_key_env: default_finnhub_env(),
@@ -360,6 +469,14 @@ impl DeskConfig {
             risk_percent: self.risk_percent,
             max_open_positions: self.max_open_positions,
             no_new_trades_before_close_minutes: self.no_new_trades_before_close_minutes,
+            min_reward_risk: self.min_reward_risk,
+        }
+    }
+
+    pub fn council_rules(&self) -> jarvis_desk::council::CouncilRules {
+        jarvis_desk::council::CouncilRules {
+            min_score: self.min_council_score,
+            min_non_neutral: self.min_non_neutral,
         }
     }
 
@@ -410,6 +527,18 @@ impl DeskConfig {
         }
         if !(1..=50).contains(&self.max_open_positions) {
             bail!("desk.max_open_positions must be between 1 and 50");
+        }
+        if !(self.min_reward_risk.is_finite() && (0.5..=5.0).contains(&self.min_reward_risk)) {
+            bail!("desk.min_reward_risk must be between 0.5 and 5");
+        }
+        if !(self.min_council_score.is_finite() && (0.05..=0.9).contains(&self.min_council_score)) {
+            bail!("desk.min_council_score must be between 0.05 and 0.9");
+        }
+        if self.scan_every_minutes != 0 && !(5..=240).contains(&self.scan_every_minutes) {
+            bail!("desk.scan_every_minutes must be 0 (off) or between 5 and 240");
+        }
+        if !(1..=6).contains(&self.min_non_neutral) {
+            bail!("desk.min_non_neutral must be between 1 and 6");
         }
         if !(0..=390).contains(&self.no_new_trades_before_close_minutes) {
             bail!("desk.no_new_trades_before_close_minutes must be between 0 and 390");
@@ -1366,6 +1495,7 @@ impl Config {
         self.market.validate()?;
         self.assistant.validate()?;
         self.desk.validate()?;
+        self.learning.validate()?;
         self.alpaca.validate()?;
         Ok(())
     }

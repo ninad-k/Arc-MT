@@ -53,6 +53,7 @@ pub async fn run(
     state.startup_check().await?;
     let _background = state.spawn_background_tasks();
     let _market_evaluator = state.spawn_market_evaluator();
+    let _council_scanner = state.spawn_council_scanner();
     let _warm_up = state.spawn_warm_up();
     let _voice_keep_warm = state.spawn_voice_keep_warm();
 

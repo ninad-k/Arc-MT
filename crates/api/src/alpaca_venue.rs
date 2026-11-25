@@ -343,6 +343,7 @@ impl BrokerReads for AlpacaVenue {
             terminal_connected: true,
             trade_allowed: self.client.is_paper(),
             server_time: iso_unix(&clock.timestamp),
+            login: None,
         })
     }
 

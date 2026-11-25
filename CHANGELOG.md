@@ -10,6 +10,20 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Added
 
+- The architecture page (ADR-0025, `/architecture`). It shows each Desk decision from the signals through six
+  members' opinions, the council and Friday's exact prompt to execution, or says why there was no trade (one
+  stop code per decision). It has:
+  - a funnel, a decision table and a decision timeline;
+  - per-trade reviews with tags, rating and notes;
+  - CSV and JSON export;
+  - a free council scan every 15 minutes in the US session, and "Ask Friday" on a passed decision.
+- A learning review: per-member Brier skill and guard counterfactuals computed in code, explained by Claude
+  Sonnet 5.5 (manual, about $0.03 a review, $2 monthly cap). Checked proposals apply in one click; loosening a
+  guard needs more evidence and a second confirmation. All changes are versioned, with rollback.
+- The Desk master account lock. The Desk trades MT5 only while MT5 is on the expected account (default IC
+  Markets 53107904, changeable in the UI). It is checked at preview and at confirm. EA 0.7.0 reports the
+  account number to the backend only; SPEC rule 8 is amended accordingly.
+
 - Alpaca as a second venue (ADR-0024): US stocks on an Alpaca paper account in Trading and Desk modes, through
   the same gate, preview, confirm and kill switch, with `[alpaca]` limits (shares, order value, positions, daily
   loss). New `jarvis-alpaca` crate, `GET /api/alpaca/account`, an `alpaca` block in `/api/status`, `venue` on
@@ -66,6 +80,8 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Changed
 
+- Sentinel vetoes a plan whose target gives less than `min_reward_risk` (default 1.5) reward to risk. Before,
+  it only warned under 1. Each veto now names its rule.
 - The system prompt now ends with the clock line instead of starting with it, and no longer carries indentation or stray space runs, so a local model reuses its cache for everything before the clock. Measured on Ollama with `qwen3.5:9b`: 0.40 s of prompt evaluation per turn before, 0.24 s after.
 - Long spoken replies are read in full instead of being cut at 600 characters.
 - Any empty Ollama reply is now retried once (with twice the token budget when it was cut off by the limit, with the same budget otherwise); the log says how many tokens the empty reply used.

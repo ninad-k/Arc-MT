@@ -143,6 +143,48 @@ pub fn app(state: AppState) -> Router {
             )),
         )
         .route("/api/desk/state", get(crate::desk_routes::state))
+        // The architecture page (spec-architecture-page): reads from SQLite, no bridge call.
+        .route(
+            "/api/architecture/map",
+            get(crate::architecture_routes::map),
+        )
+        .route(
+            "/api/architecture/decisions",
+            get(crate::architecture_routes::list),
+        )
+        .route(
+            "/api/architecture/decisions/{id}",
+            get(crate::architecture_routes::get),
+        )
+        .route(
+            "/api/architecture/decisions/{id}/review",
+            put(crate::architecture_routes::review_put),
+        )
+        .route(
+            "/api/architecture/funnel",
+            get(crate::architecture_routes::funnel),
+        )
+        .route(
+            "/api/architecture/versions",
+            get(crate::architecture_routes::versions),
+        )
+        .route(
+            "/api/architecture/versions/{version}/rollback",
+            post(crate::architecture_routes::rollback),
+        )
+        .route(
+            "/api/architecture/learning",
+            get(crate::architecture_routes::learning),
+        )
+        .route(
+            "/api/architecture/account-lock",
+            get(crate::architecture_routes::account_lock_get)
+                .put(crate::architecture_routes::account_lock_put),
+        )
+        .route(
+            "/api/architecture/learning/apply",
+            post(crate::architecture_routes::learning_apply),
+        )
         .route("/api/alpaca/account", get(alpaca_account))
         .route(
             "/api/assistant/status",
@@ -167,6 +209,19 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/desk/pulse",
             get(crate::desk_routes::pulse).layer(budget(Budget::Market)),
+        )
+        // The free council scan reads bars for every symbol; Ask Friday is a Desk turn.
+        .route(
+            "/api/architecture/scan",
+            post(crate::architecture_routes::scan).layer(budget(Budget::Market)),
+        )
+        .route(
+            "/api/architecture/decisions/{id}/ask",
+            post(crate::architecture_routes::ask).layer(budget(Budget::Chat)),
+        )
+        .route(
+            "/api/architecture/learning/review",
+            post(crate::architecture_routes::learning_review).layer(budget(Budget::Chat)),
         )
         // Claude builds from a picture: as slow as a chat turn, with the chat budget.
         .route(
@@ -1206,6 +1261,12 @@ async fn confirm(
     parts: Parts,
 ) -> Result<Json<ConfirmResponse>, ApiError> {
     let key = client_key(&parts);
+    // A Pilot preview needs MT5 still on the Desk master account (ADR-0025).
+    if let Some(desk) = state.desk() {
+        desk.confirm_check(&token)
+            .await
+            .map_err(ApiError::GateRejected)?;
+    }
     let response = state
         .router()
         .for_token(&token)

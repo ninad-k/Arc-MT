@@ -65,6 +65,14 @@ pub enum AuditKind {
     SentinelVerdict,
     /// Pilot turned an approved plan into a trade preview (or was refused).
     PilotPreview,
+    /// The trader saved a review of a decision (spec-architecture-page).
+    DecisionReviewed,
+    /// Council weights or Desk guards were applied or rolled back.
+    CouncilConfigChanged,
+    /// A learning review was asked of Claude (statistics sent, proposals received).
+    LearningReview,
+    /// The Desk master account lock was set or changed.
+    AccountLockChanged,
 }
 
 impl AuditKind {
@@ -101,6 +109,10 @@ impl AuditKind {
             AuditKind::DeskFinding => "desk_finding",
             AuditKind::SentinelVerdict => "sentinel_verdict",
             AuditKind::PilotPreview => "pilot_preview",
+            AuditKind::DecisionReviewed => "decision_reviewed",
+            AuditKind::CouncilConfigChanged => "council_config_changed",
+            AuditKind::LearningReview => "learning_review",
+            AuditKind::AccountLockChanged => "account_lock_changed",
         }
     }
 }

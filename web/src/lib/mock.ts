@@ -19,6 +19,7 @@
  *
  * Desk mode (`?mode=desk`): see `mock-desk.ts` for the scripted Friday ("what's moving", "desk view on gold",
  * "size a long on gold with a stop at 2380", "buy gold with a stop at 2380").
+ * Architecture page: `/architecture?mock=architecture` (flag is a no-op; the sample decisions are always there).
  * Market view: `?mock=viewttl=5` makes a view valid for 5 s instead of 4 h (shows the expired state).
  *
  * Chat: "close gold", "close all", "close buys", "close half of gold", "buy 0.1 gold sl 2300",
@@ -107,6 +108,22 @@ import {
 	upload
 } from './mock-assistant';
 import { deskChat, deskPilot, deskPulse, deskState } from './mock-desk';
+import {
+	architectureApply,
+	architectureAsk,
+	architectureLearning,
+	architectureLock,
+	architectureReviewRun,
+	architectureRollback,
+	architectureSetLock,
+	architectureDecision,
+	architectureDecisions,
+	architectureFunnel,
+	architectureMap,
+	architectureReview,
+	architectureScan,
+	architectureVersions
+} from './mock-architecture';
 
 export { onMockEvent };
 
@@ -590,6 +607,47 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	{
 		const pm = path.match(/^\/api\/desk\/plans\/([^/]+)\/pilot$/);
 		if (pm) return deskPilot(decodeURIComponent(pm[1])) as T;
+	}
+	if (path.startsWith('/api/architecture/')) {
+		const [route, query = ''] = path.split('?');
+		const q = new URLSearchParams(query);
+		if (route === '/api/architecture/map') return architectureMap() as T;
+		const totpCheck = () => {
+			const b = (opts.body ?? {}) as { totp?: string };
+			if (flag('auth') && b.totp !== MOCK_TOTP) throw new ApiError('unauthorized', 'code not accepted', 401);
+		};
+		if (route === '/api/architecture/versions') return architectureVersions() as T;
+		if (route === '/api/architecture/learning') return architectureLearning() as T;
+		if (route === '/api/architecture/learning/review' && opts.method === 'POST') {
+			await sleep(1500, opts.signal);
+			return architectureReviewRun() as T;
+		}
+		if (route === '/api/architecture/learning/apply' && opts.method === 'POST')
+			return architectureApply(opts.body as Parameters<typeof architectureApply>[0], totpCheck) as T;
+		if (route === '/api/architecture/account-lock') {
+			if (opts.method === 'PUT') return architectureSetLock(opts.body as Parameters<typeof architectureSetLock>[0], totpCheck) as T;
+			return architectureLock() as T;
+		}
+		const rb = route.match(/^\/api\/architecture\/versions\/(\d+)\/rollback$/);
+		if (rb && opts.method === 'POST')
+			return architectureRollback(Number(rb[1]), (opts.body ?? {}) as { confirm_loosen?: boolean; totp?: string }, totpCheck) as T;
+		if (route === '/api/architecture/funnel') return architectureFunnel(q) as T;
+		if (route === '/api/architecture/scan' && opts.method === 'POST') {
+			await sleep(1200, opts.signal);
+			return architectureScan() as T;
+		}
+		if (route === '/api/architecture/decisions') return architectureDecisions(q) as T;
+		const dm = route.match(/^\/api\/architecture\/decisions\/([^/]+)(?:\/(review|ask))?$/);
+		if (dm) {
+			const id = decodeURIComponent(dm[1]);
+			if (dm[2] === 'review' && opts.method === 'PUT') return architectureReview(id, opts.body as Parameters<typeof architectureReview>[1]) as T;
+			if (dm[2] === 'ask' && opts.method === 'POST') {
+				await sleep(900, opts.signal);
+				return architectureAsk(id) as T;
+			}
+			if (!dm[2]) return architectureDecision(id) as T;
+		}
+		throw new ApiError('not_found', `no mock for ${route}`, 404);
 	}
 	if (path === '/api/assistant/status') return assistantStatus() as T;
 	if (path === '/api/models') return listModels() as T;

@@ -51,6 +51,13 @@ pub struct Rules {
     pub risk_percent: f64,
     pub max_open_positions: u32,
     pub no_new_trades_before_close_minutes: i64,
+    /// Smallest reward to risk a plan with a target may have.
+    #[serde(default = "default_min_reward_risk")]
+    pub min_reward_risk: f64,
+}
+
+fn default_min_reward_risk() -> f64 {
+    1.5
 }
 
 impl Default for Rules {
@@ -59,6 +66,7 @@ impl Default for Rules {
             risk_percent: 0.5,
             max_open_positions: 2,
             no_new_trades_before_close_minutes: 10,
+            min_reward_risk: 1.5,
         }
     }
 }
@@ -104,6 +112,10 @@ pub enum Verdict {
     },
     Vetoed {
         reasons: Vec<String>,
+        /// The rule id behind each reason, in the same order (`"max_open_positions"`, ...).
+        /// Empty on verdicts recorded before rule ids existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<String>,
     },
 }
 
@@ -113,17 +125,59 @@ impl Verdict {
     }
 }
 
+/// The checks that need no plan: kill switch, open positions, the pre-close window and a closed
+/// US market. The council's risk seat runs these before any plan exists; [`review`] runs them
+/// again on the plan. Each failure is `(rule id, plain reason)`.
+pub fn precheck(ctx: &Context, rules: &Rules, symbol: &str) -> Vec<(&'static str, String)> {
+    let mut veto = Vec::new();
+    if ctx.kill_switch {
+        veto.push(("kill_switch", "The kill switch is engaged.".to_owned()));
+    }
+    if ctx.open_desk_positions >= rules.max_open_positions {
+        veto.push((
+            "max_open_positions",
+            format!(
+                "{} Desk positions are open; the cap is {}.",
+                ctx.open_desk_positions, rules.max_open_positions
+            ),
+        ));
+    }
+    let buffer = rules.no_new_trades_before_close_minutes * 60;
+    if ctx.phase == Phase::Open && ctx.seconds_to_close.is_some_and(|s| s <= buffer) {
+        veto.push((
+            "pre_close",
+            format!(
+                "No new trades in the last {} minutes before the US close.",
+                rules.no_new_trades_before_close_minutes
+            ),
+        ));
+    }
+    if ctx.us_session && ctx.phase != Phase::Open {
+        veto.push((
+            "market_closed",
+            format!(
+                "{symbol} trades in the US session, and the market is {}.",
+                ctx.phase.label().to_lowercase()
+            ),
+        ));
+    }
+    veto
+}
+
 /// Review a plan against the rules.
 pub fn review(plan: &Plan, ctx: &Context, rules: &Rules) -> Verdict {
-    let mut veto = Vec::new();
+    let mut veto: Vec<(&'static str, String)> = Vec::new();
     let mut ok = Vec::new();
     let mut warnings = Vec::new();
 
     if ctx.kill_switch {
-        veto.push("The kill switch is engaged.".to_owned());
+        veto.push(("kill_switch", "The kill switch is engaged.".to_owned()));
     }
     match plan.stop {
-        None => veto.push("A stop is required on every Desk trade.".to_owned()),
+        None => veto.push((
+            "stop_required",
+            "A stop is required on every Desk trade.".to_owned(),
+        )),
         Some(stop) => {
             let right_side = match plan.side {
                 Side::Buy => stop < plan.entry,
@@ -135,10 +189,13 @@ pub fn review(plan: &Plan, ctx: &Context, rules: &Rules) -> Verdict {
                     plan.entry
                 ));
             } else {
-                veto.push(format!(
-                    "The stop {stop} is on the wrong side of the entry {} for a {}.",
-                    plan.entry,
-                    plan.side.as_str()
+                veto.push((
+                    "stop_side",
+                    format!(
+                        "The stop {stop} is on the wrong side of the entry {} for a {}.",
+                        plan.entry,
+                        plan.side.as_str()
+                    ),
                 ));
             }
         }
@@ -149,24 +206,44 @@ pub fn review(plan: &Plan, ctx: &Context, rules: &Rules) -> Verdict {
             Side::Sell => target < plan.entry,
         };
         if !right_side {
-            veto.push(format!(
-                "The target {target} is on the wrong side of the entry {}.",
-                plan.entry
+            veto.push((
+                "target_side",
+                format!(
+                    "The target {target} is on the wrong side of the entry {}.",
+                    plan.entry
+                ),
             ));
         } else if let Some(stop) = plan.stop {
             let reward = (target - plan.entry).abs();
             let risk = (plan.entry - stop).abs();
-            if risk > 0.0 && reward / risk < 1.0 {
-                warnings.push(format!("Reward to risk is {:.2}, under 1.", reward / risk));
+            if risk > 0.0 {
+                let rr = reward / risk;
+                if rr + 1e-9 < rules.min_reward_risk {
+                    veto.push((
+                        "min_reward_risk",
+                        format!(
+                            "Reward to risk is {rr:.2}, under the Desk minimum of {}.",
+                            rules.min_reward_risk
+                        ),
+                    ));
+                } else {
+                    ok.push(format!(
+                        "Reward to risk is {rr:.2}, at or above {}.",
+                        rules.min_reward_risk
+                    ));
+                }
             }
         }
     } else {
         warnings.push("No target set.".to_owned());
     }
     if plan.risk_percent > rules.risk_percent + 1e-9 {
-        veto.push(format!(
-            "Risk {}% is over the Desk cap of {}%.",
-            plan.risk_percent, rules.risk_percent
+        veto.push((
+            "risk_cap",
+            format!(
+                "Risk {}% is over the Desk cap of {}%.",
+                plan.risk_percent, rules.risk_percent
+            ),
         ));
     } else {
         ok.push(format!(
@@ -175,33 +252,19 @@ pub fn review(plan: &Plan, ctx: &Context, rules: &Rules) -> Verdict {
         ));
     }
     if let Some(e) = &plan.sizing_error {
-        veto.push(format!("The position could not be sized: {e}"));
+        veto.push(("sizing", format!("The position could not be sized: {e}")));
     } else if plan.volume <= 0.0 {
-        veto.push("The sized volume is zero.".to_owned());
+        veto.push(("sizing", "The sized volume is zero.".to_owned()));
     }
-    if ctx.open_desk_positions >= rules.max_open_positions {
-        veto.push(format!(
-            "{} Desk positions are open; the cap is {}.",
-            ctx.open_desk_positions, rules.max_open_positions
-        ));
-    } else {
+    for (rule, reason) in precheck(ctx, rules, &plan.symbol) {
+        if rule != "kill_switch" {
+            veto.push((rule, reason));
+        }
+    }
+    if ctx.open_desk_positions < rules.max_open_positions {
         ok.push(format!(
             "{} of {} Desk positions in use.",
             ctx.open_desk_positions, rules.max_open_positions
-        ));
-    }
-    let buffer = rules.no_new_trades_before_close_minutes * 60;
-    if ctx.phase == Phase::Open && ctx.seconds_to_close.is_some_and(|s| s <= buffer) {
-        veto.push(format!(
-            "No new trades in the last {} minutes before the US close.",
-            rules.no_new_trades_before_close_minutes
-        ));
-    }
-    if ctx.us_session && ctx.phase != Phase::Open {
-        veto.push(format!(
-            "{} trades in the US session, and the market is {}.",
-            plan.symbol,
-            ctx.phase.label().to_lowercase()
         ));
     }
 
@@ -211,7 +274,10 @@ pub fn review(plan: &Plan, ctx: &Context, rules: &Rules) -> Verdict {
             warnings,
         }
     } else {
-        Verdict::Vetoed { reasons: veto }
+        Verdict::Vetoed {
+            rules: veto.iter().map(|(r, _)| (*r).to_owned()).collect(),
+            reasons: veto.into_iter().map(|(_, m)| m).collect(),
+        }
     }
 }
 
@@ -340,7 +406,7 @@ pub fn finding(record: &PlanRecord, at: Option<String>) -> Finding {
                 format!(" Warnings: {}", warnings.join(" "))
             }
         ),
-        Verdict::Vetoed { reasons } => format!(
+        Verdict::Vetoed { reasons, .. } => format!(
             "Vetoed {} {}: {}",
             p.side.as_str(),
             p.symbol,
@@ -392,7 +458,7 @@ mod tests {
 
     fn vetoed_for(plan: &Plan, ctx: &Context, needle: &str) {
         match review(plan, ctx, &Rules::default()) {
-            Verdict::Vetoed { reasons } => assert!(
+            Verdict::Vetoed { reasons, .. } => assert!(
                 reasons.iter().any(|r| r.contains(needle)),
                 "{reasons:?} has no '{needle}'"
             ),
@@ -513,20 +579,38 @@ mod tests {
     }
 
     #[test]
-    fn poor_reward_is_a_warning_not_a_veto() {
-        match review(
-            &Plan {
-                target: Some(121.0),
-                ..plan()
-            },
-            &ctx(),
-            &Rules::default(),
-        ) {
-            Verdict::Approved { warnings, .. } => {
-                assert!(warnings.iter().any(|w| w.contains("under 1")))
+    fn reward_under_the_minimum_is_vetoed_with_its_rule() {
+        let poor = Plan {
+            target: Some(121.0),
+            ..plan()
+        };
+        match review(&poor, &ctx(), &Rules::default()) {
+            Verdict::Vetoed { reasons, rules } => {
+                assert_eq!(rules, vec!["min_reward_risk".to_owned()]);
+                assert!(reasons[0].contains("under the Desk minimum of 1.5"));
             }
             v => panic!("{v:?}"),
         }
+        let lenient = Rules {
+            min_reward_risk: 0.0,
+            ..Rules::default()
+        };
+        assert!(review(&poor, &ctx(), &lenient).approved());
+    }
+
+    #[test]
+    fn precheck_names_each_rule_without_a_plan() {
+        let busy = Context {
+            open_desk_positions: 2,
+            kill_switch: true,
+            ..ctx()
+        };
+        let rules: Vec<&str> = precheck(&busy, &Rules::default(), "NVDA")
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        assert_eq!(rules, vec!["kill_switch", "max_open_positions"]);
+        assert!(precheck(&ctx(), &Rules::default(), "NVDA").is_empty());
     }
 
     #[test]

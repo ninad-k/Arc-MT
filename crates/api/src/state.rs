@@ -486,6 +486,7 @@ impl AppState {
                 )),
                 events: events.clone(),
                 time: time.clone(),
+                learning: config.learning.clone(),
             }));
             desk.follow_trades();
             desk
@@ -717,6 +718,30 @@ impl AppState {
             ProviderSlot::Unavailable(reason) => Err(format!("provider '{name}': {reason}")),
         }
     }
+    /// The provider the learning review asks, with `[learning] model` in place of a Claude
+    /// provider's own model, and whether it is metered (Claude).
+    pub fn learning_provider(&self) -> Result<(Arc<dyn jarvis_llm::LlmProvider>, bool), String> {
+        let cfg = &self.0.config.learning;
+        if !cfg.enabled {
+            return Err("the learning review is off ([learning] enabled = false)".into());
+        }
+        let entry = self
+            .provider(&cfg.provider)
+            .ok_or_else(|| format!("no [[llm.providers]] entry named '{}'", cfg.provider))?;
+        let ProviderSlot::Available(p) = &entry.slot else {
+            return Err(format!("provider '{}' is not available", cfg.provider));
+        };
+        let claude = entry.config.kind == jarvis_llm::ProviderKind::Anthropic;
+        if !claude || cfg.model.is_empty() || cfg.model == entry.config.model {
+            return Ok((p.clone(), claude));
+        }
+        let mut c = entry.config.clone();
+        c.model = cfg.model.clone();
+        jarvis_llm::build_provider(&c)
+            .map(|b| (Arc::from(b), true))
+            .map_err(|e| format!("provider '{}' with model {}: {e}", cfg.provider, cfg.model))
+    }
+
     /// The user's notes, when `[notes]` is on.
     pub fn notes(&self) -> Option<&Arc<jarvis_notes::NotesService>> {
         self.0.notes.as_ref()
@@ -1075,6 +1100,46 @@ impl AppState {
                                 "market views scored"
                             );
                         }
+                    }
+                    _ = stop.changed() => break,
+                }
+            }
+        }))
+    }
+
+    /// Start the free council scan (spec-architecture-page): every `[desk] scan_every_minutes`
+    /// while the US market is open, over the default watchlist and `[desk] universe`. No
+    /// language model runs. `None` when Desk mode or the scan is off.
+    pub fn spawn_council_scanner(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let desk = self.desk()?.clone();
+        let minutes = self.0.config.desk.scan_every_minutes;
+        if minutes == 0 {
+            return None;
+        }
+        let state = self.clone();
+        let mut stop = self.0.shutdown.subscribe();
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(minutes * 60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let _ = desk.decisions().settle(chrono::Utc::now().timestamp_millis()).await;
+                        let resolved = desk.resolve_outcomes().await;
+                        if resolved > 0 {
+                            tracing::info!(resolved, "decision outcomes resolved");
+                        }
+                        if desk.session_status().phase != jarvis_desk::session::Phase::Open {
+                            continue;
+                        }
+                        let settings = state.user_settings(None).await;
+                        let user = crate::desk::DeskUser {
+                            resolver: state.resolver_for(&settings),
+                            watchlist: settings.watchlist.clone(),
+                            intent: jarvis_gate::intent::Intent::Other,
+                        };
+                        let ids = desk.scan(&user).await;
+                        tracing::info!(decisions = ids.len(), "council scan");
                     }
                     _ = stop.changed() => break,
                 }

@@ -154,6 +154,8 @@ impl Default for MockState {
                 terminal_connected: true,
                 trade_allowed: true,
                 server_time: now,
+                // The account the Desk master is locked to by default (ADR-0025).
+                login: Some(53_107_904),
             },
             account: Account {
                 currency: "USD".to_owned(),

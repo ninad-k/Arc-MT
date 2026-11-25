@@ -671,6 +671,11 @@ pub struct PingInfo {
     pub trade_allowed: bool,
     /// `TimeTradeServer()`, Unix seconds.
     pub server_time: i64,
+    /// `ACCOUNT_LOGIN` (EA 0.7.0 and later; `None` from older EAs). ADR-0025: only for the
+    /// backend's master-account check. The API never returns a `PingInfo` as a whole (status
+    /// and tools pick their fields), and tests assert the number appears in no response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<u64>,
 }
 
 /// `get_price` reply data.

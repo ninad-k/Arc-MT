@@ -45,7 +45,7 @@ text, with a hard guarantee that nothing executes without their explicit, timed 
 5. Limits are checked before a preview is issued: `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, `trading_hours`.
 6. Kill switch disables all write endpoints instantly.
 7. Default mode is DEMO. LIVE needs an explicit setting plus a UI banner. The backend also refuses to start in DEMO mode if the account reports `trade_mode = real`.
-8. Account credentials stay in MT5. The backend never sends them to the LLM or the browser. `get_account` returns no login, name or server to the LLM.
+8. Account credentials stay in MT5. The backend never sends them to the LLM or the browser. `get_account` returns no login, name or server to the LLM. The backend may read the account number from the EA's `ping` only to compare it for the Desk master account lock; the browser then sees only the expected number it set and match or mismatch, and the LLM sees neither (ADR-0025).
 9. On ambiguous intent the assistant asks a clarifying question and never guesses.
 10. Every step is written to the audit table: persona, utterance, intent, preview, confirmation, bridge request, retcode.
 

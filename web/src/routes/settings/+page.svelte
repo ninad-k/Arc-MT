@@ -3,6 +3,7 @@
 	import { beforeNavigate } from '$app/navigation';
 	import { api, type Status } from '#lib/api.ts';
 	import AliasesSection from '#lib/components/settings/AliasesSection.svelte';
+	import DeskAccountSection from '#lib/components/settings/DeskAccountSection.svelte';
 	import LimitsSection from '#lib/components/settings/LimitsSection.svelte';
 	import ModelSection from '#lib/components/settings/ModelSection.svelte';
 	import PersonaSection from '#lib/components/settings/PersonaSection.svelte';
@@ -29,7 +30,8 @@
 		{ id: 'watchlist', label: 'Watchlist' },
 		{ id: 'aliases', label: 'Aliases' },
 		{ id: 'symbols', label: 'Symbols' },
-		{ id: 'limits', label: 'Limits' }
+		{ id: 'limits', label: 'Limits' },
+		{ id: 'desk', label: 'Desk account' }
 	];
 
 	onMount(() => {
@@ -106,6 +108,7 @@
 				<AliasesSection />
 				<SymbolsSection authEnabled={status ? (status.auth?.enabled ?? null) : null} />
 				<LimitsSection authEnabled={status ? (status.auth?.enabled ?? null) : null} />
+				<DeskAccountSection />
 			{/if}
 		</div>
 	</main>
