@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Panel from './Panel.svelte';
+	import VenueTag from './VenueTag.svelte';
 	import PollNote from './PollNote.svelte';
 	import { moves, watchlist } from '#lib/state/hud.svelte.ts';
 	import { fmtPrice } from '#lib/format.ts';
@@ -65,6 +66,7 @@
 						{/key}
 						<span class="flex min-w-0 items-center gap-1.5 font-medium">
 							<span class="truncate" data-testid="wl-symbol">{label.primary}</span>
+							<VenueTag venue={p.venue} />
 							{#if label.secondary}
 								<span class="num truncate text-2xs font-normal text-faint" title="Broker symbol" data-testid="wl-broker-symbol">{label.secondary}</span>
 							{/if}

@@ -98,6 +98,94 @@ impl AlpacaVenue {
         self.client.is_paper()
     }
 
+    /// The `alpaca` block of `/api/status`: reachable, paper, market open.
+    pub async fn status_view(&self, symbols: &[String]) -> serde_json::Value {
+        match self.timed(false, self.client.clock()).await {
+            Ok(clock) => serde_json::json!({
+                "enabled": true, "reason": null, "connected": true,
+                "paper": self.client.is_paper(), "market_open": clock.is_open,
+                "error": null, "symbols": symbols,
+            }),
+            Err(e) => serde_json::json!({
+                "enabled": true, "reason": null, "connected": false,
+                "paper": self.client.is_paper(), "market_open": null,
+                "error": e.to_string(), "symbols": symbols,
+            }),
+        }
+    }
+
+    /// `GET /api/alpaca/account`: the paper account and the market clock. Never an error: a failure
+    /// is reported in `error`.
+    pub async fn account_view(&self) -> serde_json::Value {
+        let (account, clock) = tokio::join!(
+            self.timed(false, self.client.account()),
+            self.timed(false, self.client.clock())
+        );
+        let (open, next_open, next_close) = match &clock {
+            Ok(c) => (
+                Some(c.is_open),
+                Some(c.next_open.clone()),
+                Some(c.next_close.clone()),
+            ),
+            Err(_) => (None, None, None),
+        };
+        match account {
+            Ok(a) => serde_json::json!({
+                "enabled": true,
+                "currency": if a.currency.is_empty() { "USD".to_owned() } else { a.currency.clone() },
+                "equity": a.equity, "cash": a.cash,
+                "day_pl": match (a.equity, a.last_equity) {
+                    (Some(e), Some(l)) => Some(((e - l) * 100.0).round() / 100.0),
+                    _ => None,
+                },
+                "buying_power": a.buying_power,
+                "market_open": open, "next_open": next_open, "next_close": next_close,
+                "blocked": a.blocked_reason(), "error": null,
+            }),
+            Err(e) => serde_json::json!({ "enabled": true, "error": e.to_string(),
+                                          "market_open": open }),
+        }
+    }
+
+    /// Recent bars for a chart, oldest first, in the market crate's shape. `timeframe` is Arc MT's
+    /// (`M5` .. `D1`).
+    pub async fn bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        count: u32,
+    ) -> Result<Vec<jarvis_market::Bar>, String> {
+        // Alpaca timeframe, and calendar days per bar (a 6.5-hour session, weekends and holidays).
+        let (tf, days_per_bar) = match timeframe {
+            "M5" => ("5Min", 5.0 / 390.0 * 1.5),
+            "M15" => ("15Min", 15.0 / 390.0 * 1.5),
+            "M30" => ("30Min", 30.0 / 390.0 * 1.5),
+            "H1" => ("1Hour", 60.0 / 390.0 * 1.5),
+            "H4" => ("4Hour", 240.0 / 390.0 * 1.5),
+            _ => ("1Day", 1.5),
+        };
+        let days = (f64::from(count) * days_per_bar).ceil() as i64 + 5;
+        let start = (chrono::Utc::now() - chrono::Duration::days(days))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let bars = self
+            .timed(true, self.client.bars(symbol, tf, &start, count))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(bars
+            .into_iter()
+            .map(|b| jarvis_market::Bar {
+                time: b.time,
+                open: b.open,
+                high: b.high,
+                low: b.low,
+                close: b.close,
+                tick_volume: b.volume.max(0.0) as u64,
+                spread: 0,
+            })
+            .collect())
+    }
+
     /// Whether `ticket` is an Alpaca position or order seen since start.
     pub fn knows_ticket(&self, ticket: u64) -> bool {
         self.lookup(ticket).is_some()

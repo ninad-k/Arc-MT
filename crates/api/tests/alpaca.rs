@@ -314,3 +314,103 @@ async fn moving_a_stop_on_alpaca_is_refused_at_preview() {
     assert!(body["preview"].is_null(), "{body}");
     assert_eq!(body["tool_calls"][0]["ok"], false);
 }
+
+async fn get(app: &TestApp, uri: &str) -> (StatusCode, Value) {
+    request(&app.router, "GET", uri, None).await
+}
+
+#[tokio::test]
+async fn reads_merge_both_venues_with_a_venue_tag() {
+    let mock = MockBridge::start().await;
+    let alpaca = MockServer::start().await;
+    mount_reads(&alpaca, true, nvda_position()).await;
+    let app = app_with(&mock, &alpaca, ScriptedLlm::new("fake", vec![])).await;
+
+    let (status, body) = get(&app, "/api/positions").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["positions"].as_array().unwrap();
+    let alpaca_rows: Vec<&Value> = rows.iter().filter(|r| r["venue"] == "alpaca").collect();
+    assert_eq!(alpaca_rows.len(), 1);
+    assert_eq!(alpaca_rows[0]["symbol"], "NVDA");
+    assert_eq!(alpaca_rows[0]["ticket"], ticket_for(NVDA_ASSET));
+    assert!(
+        rows.iter().filter(|r| r["venue"] == "mt5").count() >= 1,
+        "MT5 rows are kept"
+    );
+
+    let (_, account) = get(&app, "/api/alpaca/account").await;
+    assert_eq!(account["enabled"], true);
+    assert_eq!(account["equity"], 100000.0);
+    assert_eq!(account["market_open"], true);
+
+    let (_, status_body) = get(&app, "/api/status").await;
+    assert_eq!(status_body["alpaca"]["connected"], true);
+    assert_eq!(status_body["alpaca"]["paper"], true);
+    assert_eq!(status_body["alpaca"]["symbols"][0], "NVDA");
+}
+
+#[tokio::test]
+async fn without_alpaca_the_reads_are_unchanged() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
+    let (_, body) = get(&app, "/api/positions").await;
+    assert!(body["positions"][0].get("venue").is_none(), "{body}");
+    let (_, account) = get(&app, "/api/alpaca/account").await;
+    assert_eq!(account["enabled"], false);
+    assert!(
+        account["reason"]
+            .as_str()
+            .unwrap()
+            .contains("keys are not set")
+    );
+    let (_, s) = get(&app, "/api/status").await;
+    assert_eq!(s["alpaca"]["enabled"], false);
+}
+
+#[tokio::test]
+async fn the_price_tool_asks_alpaca_for_an_alpaca_symbol() {
+    let mock = MockBridge::start().await;
+    let alpaca = MockServer::start().await;
+    mount_reads(&alpaca, true, json!([])).await;
+    let llm = ScriptedLlm::new(
+        "fake",
+        vec![
+            Ok(tool_use_response(
+                "q1",
+                "get_price",
+                json!({ "symbol": "NVDA" }),
+            )),
+            Ok(text_response("NVDA is 120.00 bid, 120.10 ask on Alpaca.")),
+        ],
+    );
+    let app = app_with(&mock, &alpaca, llm).await;
+    let (status, body) = chat(&app, "what's NVDA at?").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["tool_calls"][0]["ok"], true, "{body}");
+    // The figures came from Alpaca's quote, so the grounding check let them through.
+    assert!(body["reply"].as_str().unwrap().contains("120.10"), "{body}");
+}
+
+#[tokio::test]
+async fn desk_sizes_an_alpaca_plan_from_alpaca() {
+    let mock = MockBridge::start().await;
+    let alpaca = MockServer::start().await;
+    mount_reads(&alpaca, true, json!([])).await;
+    let app = app_with(&mock, &alpaca, ScriptedLlm::new("fake", vec![])).await;
+    let desk = app.state.desk().unwrap();
+    let r = desk
+        .review_plan(
+            "NVDA",
+            "NVDA",
+            jarvis_desk::sentinel::Side::Buy,
+            Some(118.0),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // Entry at Alpaca's ask; 0.5% of $100,000 over a $2.10 stop is 238 whole shares.
+    assert_eq!(r.plan.entry, 120.1);
+    assert_eq!(r.plan.volume, 238.0);
+    assert_eq!(r.plan.broker_symbol, "NVDA");
+}

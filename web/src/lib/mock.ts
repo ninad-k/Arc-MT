@@ -14,6 +14,7 @@
  *   ?mock=switchbroker  a few seconds after the first request MT5 "switches" from the CFI-like broker to an
  *                       IC-Markets-like one: the symbol map changes and `symbol_map_changed` is pushed
  *   ?mock=ttl=4         confirmation window of 4 s instead of 15 s
+ *   ?mock=alpaca        Alpaca (paper) is on: status, an Alpaca account and an NVDA position on Alpaca
  *   ?mock=reset         forget the remembered switches
  *
  * Desk mode (`?mode=desk`): see `mock-desk.ts` for the scripted Friday ("what's moving", "desk view on gold",
@@ -35,6 +36,7 @@ import {
 	type ChatResponse,
 	type LoginRequest,
 	type OrdersResponse,
+	type Position,
 	type PositionsResponse,
 	type PreviewDto,
 	type RequestOptions,
@@ -218,8 +220,23 @@ function status(): Status {
 		voice: { stt: !flag('novoice'), tts: !flag('novoice') },
 		limits: effectiveLimits(),
 		persona: { id: activePersona().id, name: activePersona().name },
-		broker: statusBroker()
+		broker: statusBroker(),
+		alpaca: flag('alpaca')
+			? { enabled: true, reason: null, connected: true, paper: true, market_open: true, error: null, symbols: ['NVDA', 'AAPL'] }
+			: { enabled: false, reason: 'Alpaca keys are not set (mock)', connected: false, paper: true, market_open: null, error: null, symbols: [] }
 	};
+}
+
+/** The NVDA position on Alpaca shown with `?mock=alpaca` (display only). */
+function alpacaPositions(): Position[] {
+	if (!flag('alpaca')) return [];
+	return [
+		{
+			ticket: 4503599627370001, symbol: 'NVDA', canonical: 'NVDA', venue: 'alpaca', side: 'buy', volume: 5,
+			price_open: 119.5, price_current: 120.05, sl: 118, tp: null, profit: 2.75, swap: 0, magic: 0,
+			comment: 'alpaca', time: Math.floor(Date.now() / 1000) - 3600
+		}
+	];
 }
 
 const PROVIDERS = [
@@ -550,7 +567,14 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		throw new ApiError('bridge_unavailable', 'bridge did not reply within 3000 ms', 503);
 
 	if (path === '/api/account') return account() as T;
-	if (path === '/api/positions') return { positions: positions().map(withBrokerSymbol) } satisfies PositionsResponse as T;
+	if (path === '/api/positions')
+		return { positions: [...positions().map(withBrokerSymbol), ...alpacaPositions()] } satisfies PositionsResponse as T;
+	if (path === '/api/alpaca/account')
+		return (
+			flag('alpaca')
+				? { enabled: true, currency: 'USD', equity: 100_002.75, cash: 99_402.5, day_pl: 2.75, buying_power: 198_805, market_open: true, next_open: null, next_close: null, blocked: null, error: null }
+				: { enabled: false }
+		) as T;
 	if (path === '/api/orders') return { orders: pending.map((o) => withBrokerSymbol({ ...o })) } satisfies OrdersResponse as T;
 	if (path === '/api/watchlist') return watchlist() as T;
 

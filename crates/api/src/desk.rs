@@ -984,6 +984,13 @@ impl Desk {
         tf: Timeframe,
         count: u32,
     ) -> Result<(Vec<Bar>, u32), String> {
+        // US stocks on Alpaca come from Alpaca's market data (spec-alpaca).
+        if let Some(a) = self.parts.router.alpaca()
+            && self.parts.router.is_alpaca_symbol(broker)
+        {
+            let bars = a.venue.bars(broker, tf_name(tf), count).await?;
+            return Ok((bars, 2));
+        }
         let rates = self
             .parts
             .bridge
@@ -998,7 +1005,7 @@ impl Desk {
     }
 
     async fn price(&self, broker: &str) -> Option<wire::Price> {
-        self.parts.bridge.get_price(broker).await.ok()
+        self.reads_for(broker).get_price(broker).await.ok()
     }
 
     /// One Finnhub call, recorded in the outbound-connection log.

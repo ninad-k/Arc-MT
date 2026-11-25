@@ -143,6 +143,7 @@ pub fn app(state: AppState) -> Router {
             )),
         )
         .route("/api/desk/state", get(crate::desk_routes::state))
+        .route("/api/alpaca/account", get(alpaca_account))
         .route(
             "/api/assistant/status",
             get(crate::assistant_routes::status),
@@ -593,7 +594,66 @@ async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSessi
         "persona": { "id": persona.id, "name": persona.name },
         "broker": state.broker().book().status_view(),
         "market": state.market_status(),
+        "alpaca": alpaca_status(&state).await,
     }))
+}
+
+/// The `alpaca` block of `/api/status` (spec-alpaca).
+async fn alpaca_status(state: &AppState) -> Value {
+    match state.router().alpaca() {
+        Some(a) => {
+            let symbols: Vec<String> = a.symbols.iter().cloned().collect();
+            a.venue.status_view(&symbols).await
+        }
+        None => json!({
+            "enabled": false, "reason": state.alpaca_off(), "connected": false, "paper": false,
+            "market_open": null, "error": null, "symbols": [],
+        }),
+    }
+}
+
+/// `GET /api/alpaca/account`: the Alpaca paper account, or `{enabled: false}` when Alpaca is off.
+async fn alpaca_account(State(state): State<AppState>) -> Json<Value> {
+    match state.router().alpaca() {
+        Some(a) => Json(a.venue.account_view().await),
+        None => Json(json!({ "enabled": false, "reason": state.alpaca_off() })),
+    }
+}
+
+/// Rows from MT5 and, when Alpaca is on, from Alpaca, each tagged with its `venue`. Without Alpaca
+/// the answer is exactly as before (no `venue`). One venue failing still shows the other's rows,
+/// with the failure in `errors`; MT5 failing with no Alpaca is the usual error.
+fn merge_venues(
+    key: &str,
+    mt5: Result<Vec<Value>, BridgeError>,
+    alpaca: Option<Result<Vec<Value>, BridgeError>>,
+) -> Result<Json<Value>, ApiError> {
+    let tag = |rows: Vec<Value>, venue: &str| -> Vec<Value> {
+        rows.into_iter()
+            .map(|mut v| {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("venue".to_owned(), Value::String(venue.to_owned()));
+                }
+                v
+            })
+            .collect()
+    };
+    match (mt5, alpaca) {
+        (Ok(rows), None) => Ok(Json(json!({ key: rows }))),
+        (Err(e), None) => Err(e.into()),
+        (Ok(m), Some(Ok(a))) => {
+            let mut rows = tag(m, "mt5");
+            rows.extend(tag(a, "alpaca"));
+            Ok(Json(json!({ key: rows })))
+        }
+        (Ok(m), Some(Err(e))) => Ok(Json(
+            json!({ key: tag(m, "mt5"), "errors": { "alpaca": e.to_string() } }),
+        )),
+        (Err(e), Some(Ok(a))) => Ok(Json(
+            json!({ key: tag(a, "alpaca"), "errors": { "mt5": e.to_string() } }),
+        )),
+        (Err(e), Some(Err(_))) => Err(e.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,18 +685,32 @@ fn with_canonical<T: Serialize>(state: &AppState, rows: &[T]) -> Vec<Value> {
 
 /// `GET /api/positions`: the bridge's `Positions` shape, each row with its `canonical` name.
 async fn positions(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let positions: Positions = state.bridge().get_positions(None).await?;
-    Ok(Json(
-        json!({ "positions": with_canonical(&state, &positions.positions) }),
-    ))
+    let mt5: Result<Positions, BridgeError> = state.bridge().get_positions(None).await;
+    let mt5 = mt5.map(|p| with_canonical(&state, &p.positions));
+    let alpaca = match state.router().alpaca() {
+        Some(a) => Some(
+            crate::venue::BrokerReads::get_positions(a.venue.as_ref(), None)
+                .await
+                .map(|p| with_canonical(&state, &p.positions)),
+        ),
+        None => None,
+    };
+    merge_venues("positions", mt5, alpaca)
 }
 
 /// `GET /api/orders`: pending orders, in the bridge's `Order` shape, with `canonical`.
 async fn orders(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let orders: Orders = state.bridge().get_orders(None).await?;
-    Ok(Json(
-        json!({ "orders": with_canonical(&state, &orders.orders) }),
-    ))
+    let mt5: Result<Orders, BridgeError> = state.bridge().get_orders(None).await;
+    let mt5 = mt5.map(|o| with_canonical(&state, &o.orders));
+    let alpaca = match state.router().alpaca() {
+        Some(a) => Some(
+            crate::venue::BrokerReads::get_orders(a.venue.as_ref(), None)
+                .await
+                .map(|o| with_canonical(&state, &o.orders)),
+        ),
+        None => None,
+    };
+    merge_venues("orders", mt5, alpaca)
 }
 
 // ---------------------------------------------------------------------------
@@ -668,13 +742,26 @@ async fn watchlist(
     let resolver = state.resolver_for(&settings);
     let names = settings.watchlist.clone();
     let mut tasks = JoinSet::new();
+    let router = state.router().clone();
+    let mut on_alpaca: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (index, name) in names.iter().enumerate() {
-        let bridge = state.bridge().clone();
-        let resolved = resolver.resolve(name);
-        let name = resolver.canonical(name).unwrap_or_else(|| name.clone());
+        let canonical = resolver.canonical(name).unwrap_or_else(|| name.clone());
+        let reads: Arc<dyn crate::venue::BrokerReads> = match router.alpaca() {
+            Some(a) if router.is_alpaca_symbol(&canonical) => {
+                on_alpaca.insert(canonical.to_ascii_uppercase());
+                a.venue.clone()
+            }
+            _ => Arc::new(state.bridge().clone()),
+        };
+        let resolved = if router.is_alpaca_symbol(&canonical) {
+            Some(canonical.to_ascii_uppercase())
+        } else {
+            resolver.resolve(name)
+        };
+        let name = canonical;
         tasks.spawn(async move {
             let result = match resolved {
-                Some(symbol) => bridge.get_price(&symbol).await,
+                Some(symbol) => reads.get_price(&symbol).await,
                 None => Err(BridgeError::Remote {
                     message: format!("'{name}' is not a usable symbol name"),
                     retcode: 0,
@@ -719,8 +806,21 @@ async fn watchlist(
     {
         return Err(e.into());
     }
+    let mut rows = with_canonical(&state, &prices);
+    if state.router().alpaca().is_some() {
+        for row in &mut rows {
+            let alpaca = row
+                .get("symbol")
+                .and_then(Value::as_str)
+                .is_some_and(|s| on_alpaca.contains(&s.to_ascii_uppercase()));
+            if let Some(o) = row.as_object_mut() {
+                let venue = if alpaca { "alpaca" } else { "mt5" };
+                o.insert("venue".to_owned(), Value::String(venue.to_owned()));
+            }
+        }
+    }
     Ok(Json(Watchlist {
-        prices: with_canonical(&state, &prices),
+        prices: rows,
         errors,
     }))
 }
