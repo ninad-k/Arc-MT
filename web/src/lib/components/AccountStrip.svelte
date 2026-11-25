@@ -1,10 +1,12 @@
 <script lang="ts">
 	import Panel from './Panel.svelte';
 	import PollNote from './PollNote.svelte';
-	import { account } from '#lib/state/hud.svelte.ts';
+	import { account, alpacaAccount } from '#lib/state/hud.svelte.ts';
 	import { fmtMoney, fmtPct, fmtSigned, tone } from '#lib/format.ts';
 
 	const a = $derived(account.data);
+	/** The Alpaca paper account (spec-alpaca), when Alpaca is on. */
+	const al = $derived(alpacaAccount.data?.enabled ? alpacaAccount.data : null);
 	const marginTone = $derived(
 		!a || a.margin <= 0 ? 'flat' : a.margin_level < 100 ? 'down' : a.margin_level < 200 ? 'warn' : 'flat'
 	);
@@ -54,5 +56,28 @@
 				<dd class="num text-sm text-mute">{fmtMoney(a.margin)}</dd>
 			</div>
 		</dl>
+	{/if}
+	{#if al}
+		<div class="border-t border-line/70 px-3 py-2" data-testid="alpaca-account">
+			<div class="flex items-center justify-between text-2xs tracking-widest text-faint uppercase">
+				<span>Alpaca paper</span>
+				<span class={al.market_open ? 'text-up' : 'text-mute'}>
+					{al.market_open === true ? 'market open' : al.market_open === false ? 'market closed' : '—'}
+				</span>
+			</div>
+			{#if al.error}
+				<p class="mt-1 text-xs text-warn">{al.error}</p>
+			{:else}
+				<dl class="num mt-1 grid grid-cols-3 gap-2 text-xs">
+					<div><dt class="text-faint">Equity</dt><dd class="text-ink">{al.equity === undefined ? '—' : fmtMoney(al.equity)}</dd></div>
+					<div>
+						<dt class="text-faint">Today</dt>
+						<dd class="t-{tone(al.day_pl ?? 0)}">{al.day_pl === null || al.day_pl === undefined ? '—' : fmtSigned(al.day_pl)}</dd>
+					</div>
+					<div><dt class="text-faint">Buying power</dt><dd class="text-mute">{al.buying_power === null || al.buying_power === undefined ? '—' : fmtMoney(al.buying_power)}</dd></div>
+				</dl>
+				{#if al.blocked}<p class="mt-1 text-xs text-down">Cannot trade: {al.blocked}</p>{/if}
+			{/if}
+		</div>
 	{/if}
 </Panel>

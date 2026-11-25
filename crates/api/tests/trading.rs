@@ -350,6 +350,11 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 /// in `trading.rs` (SPEC rule 3). A new call site anywhere else fails this test. The scan covers
 /// sub-directories, the write `Command` variants and the generic `call`, which could carry a
 /// write without naming one of the five methods.
+///
+/// Alpaca (ADR-0024): `alpaca_venue.rs` is Alpaca's write sink, the counterpart of the bridge
+/// client's write methods. It may name the write `Command` variants (it translates the commands
+/// `Trading::confirm` hands it), but never calls a bridge write. The Alpaca client's own write
+/// methods may be called from that file only, and `send_write` from `trading.rs` only.
 #[test]
 fn bridge_write_methods_are_only_called_from_trading_rs() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -373,13 +378,40 @@ fn bridge_write_methods_are_only_called_from_trading_rs() {
         "Command::OrderCancel",
     ];
     let generic_call = [".call(", ".call::<"];
+    let alpaca_writes = [".submit_order(", ".close_position(", ".cancel_order("];
+    let sink_call = [".send_write("];
     let mut trading_method_hits = 0;
+    let mut alpaca_sink_seen = false;
     for path in files {
         let text = std::fs::read_to_string(&path).unwrap();
         // Ignore the unit-test modules at the bottom of each file.
         let code = text.split("#[cfg(test)]").next().unwrap();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let count = |needles: &[&str]| needles.iter().filter(|n| code.contains(**n)).count();
+        if name != "trading.rs" {
+            assert_eq!(
+                count(&sink_call),
+                0,
+                "{} calls a write sink directly",
+                path.display()
+            );
+        }
+        if name == "alpaca_venue.rs" {
+            alpaca_sink_seen = true;
+            assert_eq!(count(&methods), 0, "the Alpaca sink calls a bridge write");
+            assert_eq!(
+                count(&generic_call),
+                0,
+                "the Alpaca sink uses the generic bridge call"
+            );
+            continue;
+        }
+        assert_eq!(
+            count(&alpaca_writes),
+            0,
+            "{} calls an Alpaca write outside the Alpaca sink",
+            path.display()
+        );
         if name == "trading.rs" {
             trading_method_hits = count(&methods);
             continue;
@@ -411,6 +443,7 @@ fn bridge_write_methods_are_only_called_from_trading_rs() {
         methods.len(),
         "trading.rs is the one write site"
     );
+    assert!(alpaca_sink_seen, "the scan must reach the Alpaca sink");
 }
 
 // -------------------------------------------------- full flow (rules 2, 3, 10)

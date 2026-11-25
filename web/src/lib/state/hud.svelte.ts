@@ -1,6 +1,7 @@
 import {
 	api,
 	type Account,
+	type AlpacaAccount,
 	type PendingOrder,
 	type Position,
 	type PriceTick,
@@ -53,6 +54,11 @@ export const status = new Poller<Status>((s) => api.status(s), {
 	}
 });
 export const account = new Poller<Account>((s) => api.account(s), {
+	interval: POLL_MS,
+	maxInterval: MAX_BACKOFF_MS
+});
+/** The Alpaca paper account (spec-alpaca); `{enabled: false}` when Alpaca is off. */
+export const alpacaAccount = new Poller<AlpacaAccount>((s) => api.alpacaAccount(s), {
 	interval: POLL_MS,
 	maxInterval: MAX_BACKOFF_MS
 });
@@ -117,7 +123,7 @@ class Backend {
 
 export const backend = new Backend();
 
-const all = [status, account, positions, orders, watchlist];
+const all = [status, account, alpacaAccount, positions, orders, watchlist];
 
 /** Re-read everything a trade can change. Called after an execute and on server events. */
 export function refreshTrading(): void {

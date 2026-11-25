@@ -10,6 +10,10 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Added
 
+- Alpaca as a second venue (ADR-0024): US stocks on an Alpaca paper account in Trading and Desk modes, through
+  the same gate, preview, confirm and kill switch, with `[alpaca]` limits (shares, order value, positions, daily
+  loss). New `jarvis-alpaca` crate, `GET /api/alpaca/account`, an `alpaca` block in `/api/status`, `venue` on
+  positions, orders and the watchlist, and venue tags in the HUD. Live Alpaca URLs are refused.
 - Desk mode (Nimbus Desk, ADR-0023): Friday and eight specialists (Atlas, Capitol, Scout, Athena, Chartist, Oracle,
   Sentinel, Pilot, Ledger) in a new `jarvis-desk` crate and `POST /api/chat {"mode": "desk"}`. Trades go only through
   a one-time Sentinel approval, Pilot's preview and the usual confirmation. New endpoints `GET /api/desk/state`,

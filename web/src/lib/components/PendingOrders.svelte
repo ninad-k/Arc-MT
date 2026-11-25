@@ -3,6 +3,7 @@
 	import { tradeActions } from '#lib/state/trade-actions.svelte.ts';
 	import { decimalsOf, fmtPrice, fmtVolume } from '#lib/format.ts';
 	import { symbolLabel } from '#lib/symbols.ts';
+	import VenueTag from './VenueTag.svelte';
 
 	let { blocked }: { blocked: string | null } = $props();
 
@@ -29,6 +30,7 @@
 								<span class="num truncate text-2xs text-faint" title="Broker symbol">{sl.secondary}</span>
 							{/if}
 							<span class="pill h-5 px-1.5 {o.type.startsWith('buy') ? 't-up' : 't-down'}">{label(o.type)}</span>
+							<VenueTag venue={o.venue} />
 						</div>
 						<div class="num mt-0.5 text-xs text-mute">
 							{fmtVolume(o.volume_current)} @ {fmtPrice(o.price_open, d)}

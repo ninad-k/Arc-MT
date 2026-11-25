@@ -100,7 +100,8 @@ impl ReadTool {
             ReadTool::GetPrice => {
                 "Get the current bid/ask price of one symbol from MetaTrader 5. You may pass the \
                  user's own word (for example \"gold\", \"nasdaq\", \"dow jones\") or a broker \
-                 symbol (\"XAUUSD\"); aliases are resolved for you. Always call this for any \
+                 symbol (\"XAUUSD\"); aliases are resolved for you. US stocks set up on Alpaca \
+                 (paper) are priced by Alpaca and say so in `venue`. Always call this for any \
                  question about a current price."
             }
             ReadTool::GetAccount => {
@@ -559,6 +560,8 @@ pub struct ToolRegistry {
     /// Spoken alias -> canonical name, for the intent parser.
     intent_aliases: Arc<HashMap<String, String>>,
     trading: Option<Arc<Trading>>,
+    /// Picks MT5 or Alpaca for each proposal (spec-alpaca).
+    router: Option<Arc<crate::venue::VenueRouter>>,
     market: Option<Arc<MarketService>>,
     notes: Option<Arc<NotesService>>,
 }
@@ -588,6 +591,7 @@ impl ToolRegistry {
             trading: None,
             market: None,
             notes: None,
+            router: None,
         }
     }
 
@@ -651,6 +655,29 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_router(mut self, router: Arc<crate::venue::VenueRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// The name a symbol trades under: an Alpaca symbol is its plain ticker (`NVDA`), anything else
+    /// the MT5 broker's name from the symbol map.
+    pub fn resolve_symbol(&self, raw: &str) -> Option<String> {
+        if let Some(router) = &self.router {
+            let canonical = self
+                .resolver
+                .canonical(raw)
+                .unwrap_or_else(|| raw.trim().to_ascii_uppercase());
+            if router.is_alpaca_symbol(&canonical) {
+                return Some(canonical.to_ascii_uppercase());
+            }
+            if router.is_alpaca_symbol(raw) {
+                return Some(raw.trim().to_ascii_uppercase());
+            }
+        }
+        self.resolver.resolve(raw)
+    }
+
     /// The same tools with another symbol resolver: a user's turn resolves names with the
     /// user's own aliases merged over the configured ones. Cheap; limits, tokens and the
     /// bridge are shared.
@@ -676,7 +703,7 @@ impl ToolRegistry {
     pub fn parse_intent(&self, text: &str) -> Intent {
         let mut parsed = intent::parse(text, &self.intent_aliases);
         let resolve = |s: &mut Option<String>| {
-            *s = s.take().and_then(|name| self.resolver.resolve(&name));
+            *s = s.take().and_then(|name| self.resolve_symbol(&name));
         };
         match &mut parsed {
             Intent::Order(f) => resolve(&mut f.symbol),
@@ -817,6 +844,11 @@ impl ToolRegistry {
             persona: ctx.persona.clone(),
             // Chat orders give a volume; sizing by risk from chat is not wired up yet.
             risk_percent: None,
+        };
+        // MT5 or Alpaca, by the symbol or ticket the proposal names (spec-alpaca).
+        let trading = match &self.router {
+            Some(router) => router.for_action(&request.action).await,
+            None => trading,
         };
         match trading.propose(request).await {
             Ok(preview) => ToolOutcome {
@@ -976,7 +1008,7 @@ impl ToolRegistry {
     }
 
     fn symbol(&self, raw: &str) -> Result<String, String> {
-        self.resolver.resolve(raw).ok_or_else(|| {
+        self.resolve_symbol(raw).ok_or_else(|| {
             format!("'{raw}' is not a usable symbol name. Ask the user which instrument they mean.")
         })
     }
@@ -995,6 +1027,15 @@ impl ToolRegistry {
         }
         let Args { symbol: raw } = parse_args(args, "get_price")?;
         let symbol = self.symbol(&raw)?;
+        // An Alpaca symbol is priced by Alpaca (spec-alpaca).
+        if let Some(a) = self.alpaca_for(&symbol) {
+            let price = crate::venue::BrokerReads::get_price(a.venue.as_ref(), &symbol)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut v = self.with_canonical(&price)?;
+            v["venue"] = json!("alpaca");
+            return compact(&v);
+        }
         let price: Price = self
             .call(
                 Command::GetPrice {
@@ -1011,7 +1052,33 @@ impl ToolRegistry {
         // `Account` has no login/name/server field (rule 8): nothing to redact, by type.
         let account: jarvis_bridge_client::protocol::Account =
             self.call(Command::GetAccount {}, ex, None).await?;
-        compact(&account)
+        match self.router.as_ref().and_then(|r| r.alpaca()) {
+            // With Alpaca on, its paper account is reported next to the MT5 one.
+            Some(a) => {
+                let mut v = serde_json::to_value(&account).map_err(|e| e.to_string())?;
+                v["alpaca"] = a.venue.account_view().await;
+                compact(&v)
+            }
+            None => compact(&account),
+        }
+    }
+
+    /// Alpaca, when `symbol` trades there.
+    fn alpaca_for(&self, symbol: &str) -> Option<&crate::venue::AlpacaRoute> {
+        let router = self.router.as_ref()?;
+        router.alpaca().filter(|_| router.is_alpaca_symbol(symbol))
+    }
+
+    /// Alpaca rows for a positions or orders listing: all of them without a filter, those of an
+    /// Alpaca symbol, none for an MT5 symbol. `None` when Alpaca is off.
+    fn alpaca_listing(&self, symbol: Option<&str>) -> Option<&crate::venue::AlpacaRoute> {
+        let router = self.router.as_ref()?;
+        let a = router.alpaca()?;
+        match symbol {
+            None => Some(a),
+            Some(s) if router.is_alpaca_symbol(s) => Some(a),
+            Some(_) => None,
+        }
     }
 
     async fn get_positions(&self, args: Value, ex: &mut Exchange) -> Result<String, String> {
@@ -1023,22 +1090,64 @@ impl ToolRegistry {
         let Args { symbol: raw, side } = parse_args(args, "get_positions")?;
         let side = parse_side(side.as_deref())?;
         let symbol = self.optional_symbol(raw.as_deref())?;
-        let positions: Positions = self
-            .call(Command::GetPositions { symbol }, ex, raw.as_deref())
-            .await?;
-        let mut list = positions.positions;
+        let alpaca_only = symbol
+            .as_deref()
+            .is_some_and(|s| self.alpaca_for(s).is_some());
+        let mut list = if alpaca_only {
+            Vec::new()
+        } else {
+            let positions: Positions = self
+                .call(
+                    Command::GetPositions {
+                        symbol: symbol.clone(),
+                    },
+                    ex,
+                    raw.as_deref(),
+                )
+                .await?;
+            positions.positions
+        };
+        let mt5_count = list.len();
+        let alpaca = self.alpaca_listing(symbol.as_deref());
+        if let Some(a) = alpaca {
+            let rows =
+                crate::venue::BrokerReads::get_positions(a.venue.as_ref(), symbol.as_deref())
+                    .await
+                    .map_err(|e| format!("Alpaca: {e}"))?;
+            list.extend(rows.positions);
+        }
+        let mut venues: Vec<&str> = (0..list.len())
+            .map(|i| if i < mt5_count { "mt5" } else { "alpaca" })
+            .collect();
         if let Some(side) = side {
-            list.retain(|p| p.side == side);
+            let mut kept = Vec::new();
+            let mut kept_venues = Vec::new();
+            for (p, v) in list.into_iter().zip(venues) {
+                if p.side == side {
+                    kept.push(p);
+                    kept_venues.push(v);
+                }
+            }
+            list = kept;
+            venues = kept_venues;
         }
         for p in &mut list {
             p.comment = model_safe_comment(&p.comment);
         }
         let summary = summarize_positions(&list);
+        let mut rows = self.with_canonical(&list)?;
+        if alpaca.is_some()
+            && let Some(arr) = rows.as_array_mut()
+        {
+            for (row, v) in arr.iter_mut().zip(&venues) {
+                row["venue"] = json!(v);
+            }
+        }
         compact(&json!({
             "count": list.len(),
             "total_profit": summary["profit"],
             "summary": summary,
-            "positions": self.with_canonical(&list)?,
+            "positions": rows,
         }))
     }
 
@@ -1049,14 +1158,43 @@ impl ToolRegistry {
         }
         let Args { symbol: raw } = parse_args(args, "get_orders")?;
         let symbol = self.optional_symbol(raw.as_deref())?;
-        let orders: Orders = self
-            .call(Command::GetOrders { symbol }, ex, raw.as_deref())
-            .await?;
-        let mut list = orders.orders;
+        let alpaca_only = symbol
+            .as_deref()
+            .is_some_and(|s| self.alpaca_for(s).is_some());
+        let mut list = if alpaca_only {
+            Vec::new()
+        } else {
+            let orders: Orders = self
+                .call(
+                    Command::GetOrders {
+                        symbol: symbol.clone(),
+                    },
+                    ex,
+                    raw.as_deref(),
+                )
+                .await?;
+            orders.orders
+        };
+        let mt5_count = list.len();
+        let alpaca = self.alpaca_listing(symbol.as_deref());
+        if let Some(a) = alpaca {
+            let rows = crate::venue::BrokerReads::get_orders(a.venue.as_ref(), symbol.as_deref())
+                .await
+                .map_err(|e| format!("Alpaca: {e}"))?;
+            list.extend(rows.orders);
+        }
         for o in &mut list {
             o.comment = model_safe_comment(&o.comment);
         }
-        compact(&json!({ "count": list.len(), "orders": self.with_canonical(&list)? }))
+        let mut rows = self.with_canonical(&list)?;
+        if alpaca.is_some()
+            && let Some(arr) = rows.as_array_mut()
+        {
+            for (i, row) in arr.iter_mut().enumerate() {
+                row["venue"] = json!(if i < mt5_count { "mt5" } else { "alpaca" });
+            }
+        }
+        compact(&json!({ "count": list.len(), "orders": rows }))
     }
 
     async fn get_history(&self, args: Value, ex: &mut Exchange) -> Result<String, String> {

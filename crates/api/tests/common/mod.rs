@@ -305,6 +305,10 @@ pub struct Options<'a> {
     pub desk: &'a str,
     /// Desk mode's Finnhub client (default: none).
     pub finnhub: Option<jarvis_news::FinnhubData>,
+    /// Extra lines for the `[alpaca]` table (no keys are read from the environment).
+    pub alpaca: &'a str,
+    /// The Alpaca client (default: none, so Alpaca is off).
+    pub alpaca_client: Option<jarvis_alpaca::AlpacaClient>,
 }
 
 impl Default for Options<'_> {
@@ -331,6 +335,8 @@ impl Default for Options<'_> {
             assistant: "",
             desk: "",
             finnhub: None,
+            alpaca: "",
+            alpaca_client: None,
         }
     }
 }
@@ -442,6 +448,15 @@ finnhub_key_env = 'JARVIS_TEST_NO_FINNHUB_KEY'
         assistant_dir.join("desk-spend.json").display(),
         opts.desk
     ));
+    toml.push_str(&format!(
+        "
+[alpaca]
+key_id_env = 'JARVIS_TEST_NO_ALPACA_KEY'
+secret_key_env = 'JARVIS_TEST_NO_ALPACA_SECRET'
+{}
+",
+        opts.alpaca
+    ));
     let config = Config::from_toml_str(&toml).expect("test config");
     let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
@@ -486,6 +501,7 @@ finnhub_key_env = 'JARVIS_TEST_NO_FINNHUB_KEY'
         personas: Some(opts.personas.unwrap_or_else(real_personas)),
         news: Some(opts.news.unwrap_or_else(jarvis_news::NewsService::disabled)),
         finnhub: opts.finnhub,
+        alpaca: opts.alpaca_client,
     };
     let state = AppState::new_with(config, bridge, audit.clone(), slots, overrides);
     TestApp {

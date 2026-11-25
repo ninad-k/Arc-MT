@@ -3,11 +3,12 @@
 	import PollNote from './PollNote.svelte';
 	import Menu, { type MenuItem } from './Menu.svelte';
 	import PendingOrders from './PendingOrders.svelte';
-	import { backend, digitsFor, positions } from '#lib/state/hud.svelte.ts';
+	import { backend, digitsFor, positions, status } from '#lib/state/hud.svelte.ts';
 	import { tradeActions } from '#lib/state/trade-actions.svelte.ts';
 	import { decimalsOf, fmtPrice, fmtSigned, fmtVolume, tone } from '#lib/format.ts';
 	import { countSide, groupBySymbol, halfVolume } from '#lib/trading.ts';
 	import { symbolLabel } from '#lib/symbols.ts';
+	import VenueTag from './VenueTag.svelte';
 	import type { Position } from '#lib/api.ts';
 
 	const list = $derived(positions.data ?? []);
@@ -94,7 +95,9 @@
 		{#if list.length === 0}
 			<div class="p-4 text-xs text-mute" role="status">
 				<p class="text-sm text-ink">No open positions</p>
-				<p class="mt-1">Trades opened in MetaTrader 5 will appear here.</p>
+				<p class="mt-1">
+					Trades opened in MetaTrader 5{status.data?.alpaca?.enabled ? ' or on Alpaca (paper)' : ''} will appear here.
+				</p>
 			</div>
 		{:else}
 			<ul>
@@ -109,6 +112,7 @@
 									<span class="num truncate text-2xs text-faint" title="Broker symbol" data-testid="position-broker-symbol">{label.secondary}</span>
 								{/if}
 								<span class="pill {p.side === 'buy' ? 't-up' : 't-down'} h-5 px-1.5">{p.side}</span>
+								<VenueTag venue={p.venue} />
 								<span class="num text-xs text-mute">{fmtVolume(p.volume)}</span>
 							</div>
 							<span class="num text-sm font-medium t-{tone(p.profit)}">{fmtSigned(p.profit)}</span>

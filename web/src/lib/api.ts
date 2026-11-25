@@ -152,6 +152,35 @@ export interface Status {
 	persona?: { id: string; name: string };
 	/** The broker MT5 is logged in to and how many canonical instruments map onto it. Absent on an older server. */
 	broker?: StatusBroker | null;
+	/** Alpaca, the second venue (spec-alpaca). Absent on an older server. */
+	alpaca?: AlpacaStatus;
+}
+
+export interface AlpacaStatus {
+	enabled: boolean;
+	/** Why Alpaca is off, when it is. */
+	reason: string | null;
+	connected: boolean;
+	paper: boolean;
+	market_open: boolean | null;
+	error: string | null;
+	symbols: string[];
+}
+
+/** `GET /api/alpaca/account`: the Alpaca paper account, or `{enabled: false}`. */
+export interface AlpacaAccount {
+	enabled: boolean;
+	currency?: string;
+	equity?: number;
+	cash?: number;
+	/** Today's change: equity minus last close's equity. */
+	day_pl?: number | null;
+	buying_power?: number | null;
+	market_open?: boolean | null;
+	next_open?: string | null;
+	next_close?: string | null;
+	blocked?: string | null;
+	error?: string | null;
 }
 
 export interface StatusBroker {
@@ -175,10 +204,14 @@ export interface Account {
 
 export type Side = 'buy' | 'sell';
 
+/** Where a symbol trades (spec-alpaca): MT5, or Alpaca for US stocks (paper). Absent = MT5. */
+export type Venue = 'mt5' | 'alpaca';
+
 export interface Position {
 	ticket: number;
 	/** The broker's own name for the instrument (`XAUUSD_`). */
 	symbol: string;
+	venue?: Venue;
 	/** The canonical name (`XAUUSD`). Absent on a server without symbol mapping. */
 	canonical?: string;
 	side: Side;
@@ -211,6 +244,7 @@ export type OrderType =
 export interface PendingOrder {
 	ticket: number;
 	symbol: string;
+	venue?: Venue;
 	canonical?: string;
 	type: OrderType;
 	volume_initial: number;
@@ -229,6 +263,7 @@ export interface OrdersResponse {
 
 export interface PriceTick {
 	symbol: string;
+	venue?: Venue;
 	canonical?: string;
 	bid: number;
 	ask: number;
@@ -950,6 +985,7 @@ const postBytes = <T>(path: string, blob: Blob, timeoutMs: number) =>
 export const api = {
 	status: (signal?: AbortSignal) => request<Status>('/api/status', { signal }),
 	account: (signal?: AbortSignal) => request<Account>('/api/account', { signal }),
+	alpacaAccount: (signal?: AbortSignal) => request<AlpacaAccount>('/api/alpaca/account', { signal }),
 	positions: (signal?: AbortSignal) => request<PositionsResponse>('/api/positions', { signal }),
 	/**
 	 * Pending orders. docs/api.md lists no read endpoint for them; `GET /api/orders` returning

@@ -304,6 +304,14 @@ impl WriteSink for BridgeClient {
 /// Everything [`Trading`] is built from.
 pub struct TradingParts {
     pub bridge: BridgeClient,
+    /// Where reads go; `None` uses `bridge` (MT5). Alpaca's instance passes its venue here.
+    pub reads: Option<Arc<dyn crate::venue::BrokerReads>>,
+    /// The venue this instance trades on. MT5-only checks (broker account identity) are skipped
+    /// for other venues.
+    pub venue: crate::venue::VenueKind,
+    /// Largest order value in the account currency (volume x price), checked on top of the gate.
+    /// Alpaca's `max_notional_usd`; `None` for MT5.
+    pub max_notional: Option<f64>,
     /// Destination of confirmed writes; `None` uses `bridge`.
     pub write_sink: Option<Arc<dyn WriteSink>>,
     pub clock: ServerClock,
@@ -344,7 +352,9 @@ struct Registry {
 }
 
 pub struct Trading {
-    bridge: BridgeClient,
+    bridge: Arc<dyn crate::venue::BrokerReads>,
+    venue: crate::venue::VenueKind,
+    max_notional: Option<f64>,
     sink: Arc<dyn WriteSink>,
     clock: ServerClock,
     mode: Arc<ModeMonitor>,
@@ -380,7 +390,11 @@ impl Trading {
             sink: parts
                 .write_sink
                 .unwrap_or_else(|| Arc::new(parts.bridge.clone())),
-            bridge: parts.bridge,
+            bridge: parts
+                .reads
+                .unwrap_or_else(|| Arc::new(parts.bridge.clone())),
+            venue: parts.venue,
+            max_notional: parts.max_notional,
             clock: parts.clock,
             mode: parts.mode,
             audit: parts.audit,
@@ -438,6 +452,35 @@ impl Trading {
 
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    /// Revoke every live token of this instance (the kill switch was engaged elsewhere).
+    pub fn revoke_tokens(&self) {
+        self.tokens.revoke_all();
+    }
+
+    /// The venue this instance trades on.
+    pub fn venue(&self) -> crate::venue::VenueKind {
+        self.venue
+    }
+
+    /// Whether this instance issued `token` (to route confirm, cancel and read-back).
+    pub fn holds_token(&self, token: &str) -> bool {
+        self.tokens.contains(token)
+    }
+
+    /// The MT5 broker account a preview belongs to; `None` on other venues, which have one account.
+    fn mt5_identity(&self) -> Option<crate::broker::BrokerId> {
+        (self.venue == crate::venue::VenueKind::Mt5)
+            .then(|| self.broker.book().identity())
+            .flatten()
+    }
+
+    /// Notice an MT5 account switch (MT5 only).
+    async fn observe_broker(&self) {
+        if self.venue == crate::venue::VenueKind::Mt5 {
+            self.broker.observe().await;
+        }
     }
 
     pub fn broker(&self) -> &Arc<BrokerService> {
@@ -537,15 +580,43 @@ impl Trading {
         }
 
         // The action's symbols were resolved for this account a moment ago.
-        let resolved_for = self.broker.book().identity();
+        let resolved_for = self.mt5_identity();
+        if self.venue != crate::venue::VenueKind::Mt5
+            && matches!(req.action, ProposedAction::Modify(_))
+        {
+            return Err(GateError::Invalid(format!(
+                "moving a stop loss or take profit is not supported on {} yet; close the                  position and open it again with the new levels",
+                self.venue.as_str()
+            ))
+            .into());
+        }
         let snapshot = self.snapshot(&req.action).await?;
-        let broker = self.broker.book().identity();
+        let broker = self.mt5_identity();
         if resolved_for.is_some() && resolved_for != broker {
             return Err(TradingError::BrokerChanged);
         }
         let limits = self.gate_limits();
         // A risk-sized order gets its volume here; from now on it is an order like any other.
         let (action, sizing) = size_by_risk(&req.action, req.risk_percent, &snapshot, &limits)?;
+        if let (Some(max), ProposedAction::Order(o)) = (self.max_notional, &action)
+            && let Some(price) = snapshot.prices.get(&o.symbol)
+        {
+            let at = o.price.unwrap_or(if o.side == Side::Buy {
+                price.ask
+            } else {
+                price.bid
+            });
+            let value = o.volume * at;
+            if value > max + 1e-9 {
+                return Err(GateError::LimitExceeded {
+                    rule: "max_notional_usd",
+                    detail: format!(
+                        "this order is worth about {value:.2}, over the limit of {max:.2} per order"
+                    ),
+                }
+                .into());
+            }
+        }
         let mut preview = evaluate(&action, &snapshot, &limits, self.kill_switch.is_engaged())?;
         if let Some(s) = &sizing {
             preview.description = format!("{}, {}", preview.description, sizing::describe(s));
@@ -641,7 +712,7 @@ impl Trading {
         }
         // An account switch is noticed here (and its symbols re-detected) before anything is
         // read for the gate.
-        self.broker.observe().await;
+        self.observe_broker().await;
         let account = self.bridge.get_account().await?;
         self.mode.observe(account.trade_mode);
         if self.mode.mismatch() {
@@ -757,8 +828,8 @@ impl Trading {
         }
         // A preview belongs to the broker account it was made on (symbols and tickets do).
         if let Some(expected) = meta.as_ref().and_then(|m| m.broker.as_ref()) {
-            self.broker.observe().await;
-            if self.broker.book().identity().as_ref() != Some(expected) {
+            self.observe_broker().await;
+            if self.mt5_identity().as_ref() != Some(expected) {
                 self.refuse_broker_changed(token, &who, expected).await;
                 return Err(TradingError::BrokerChanged);
             }
@@ -909,9 +980,9 @@ impl Trading {
                     .observe(info.server_time, chrono::Utc::now().timestamp());
                 self.mode.observe(info.trade_mode);
                 // Still the account the user confirmed on?
-                self.broker.observe().await;
+                self.observe_broker().await;
                 if let Some(expected) = &broker
-                    && self.broker.book().identity().as_ref() != Some(expected)
+                    && self.mt5_identity().as_ref() != Some(expected)
                 {
                     self.record(
                         &who,
@@ -1067,10 +1138,14 @@ impl Trading {
         }
 
         if let Some((index, e)) = unknown {
+            let (who, place) = match self.venue {
+                crate::venue::VenueKind::Mt5 => ("The bridge", "MetaTrader 5"),
+                crate::venue::VenueKind::Alpaca => ("Alpaca", "your Alpaca paper account"),
+            };
             return Err(TradingError::OutcomeUnknown(format!(
-                "The bridge did not answer write {} of {total} ({e}), so it is unknown whether \
+                "{who} did not answer write {} of {total} ({e}), so it is unknown whether \
                  it was executed. {} earlier write(s) completed. The remaining writes were NOT \
-                 sent. Check your positions in MetaTrader 5 before doing anything else.",
+                 sent. Check your positions in {place} before doing anything else.",
                 index + 1,
                 results.len()
             )));
