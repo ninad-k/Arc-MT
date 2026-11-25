@@ -56,7 +56,9 @@
 		{/if}
 	</div>
 
-	<div class="flex min-w-0 items-center gap-2">
+	<!-- Three modes and the persona toggle do not fit next to the wordmark on a phone: below
+	     480 px they get a row of their own. -->
+	<div class="flex min-w-0 items-center gap-2 max-[480px]:col-span-2 max-[480px]:justify-between">
 		<ModeSwitch />
 		<!-- Assistant mode is always Jarvis and Desk mode always Friday, so the persona choice belongs to Trading mode. -->
 		{#if !appMode.assistant && !appMode.desk}
