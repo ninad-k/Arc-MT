@@ -15,7 +15,7 @@
 	<div class="flex min-w-0 items-center gap-2 {klass}" data-testid="brain-badge">
 		<span class="hud-title max-[420px]:sr-only lg:max-xl:sr-only">Brain</span>
 		<span
-			class="num flex h-7 min-w-0 flex-1 items-center truncate border border-line bg-panel/70 px-2 text-2xs text-ink lg:w-44 lg:min-w-28 lg:flex-initial xl:w-56"
+			class="num flex h-7 min-w-0 flex-1 items-center truncate border border-line bg-panel/70 px-2 text-2xs text-ink lg:w-44 lg:min-w-20 lg:flex-initial xl:w-56 xl:min-w-28"
 			title="Assistant mode answers with this model (set in [assistant] of the server config)"
 		>
 			{brain ? `${brain.provider} · ${brain.model ?? '?'}` : 'Claude'}
@@ -27,7 +27,7 @@
 	<div class="flex min-w-0 items-center gap-2 {klass}" data-testid="brain-badge">
 		<span class="hud-title max-[420px]:sr-only lg:max-xl:sr-only">Brain</span>
 		<span
-			class="num flex h-7 min-w-0 flex-1 items-center truncate border border-line bg-panel/70 px-2 text-2xs text-ink lg:w-44 lg:min-w-28 lg:flex-initial xl:w-56"
+			class="num flex h-7 min-w-0 flex-1 items-center truncate border border-line bg-panel/70 px-2 text-2xs text-ink lg:w-44 lg:min-w-20 lg:flex-initial xl:w-56 xl:min-w-28"
 			title="Desk mode answers with this model (set in [desk] of the server config)"
 		>
 			{brain ? `${brain.provider} · ${brain.model ?? '?'}` : '—'}
@@ -36,12 +36,12 @@
 {:else}
 <div class="flex min-w-0 items-center gap-2 {klass}">
 	<label for="llm-provider" class="hud-title max-[420px]:sr-only lg:max-xl:sr-only">LLM</label>
-	<!-- Capped width, and on the one-row bar it gives way first (down to 7rem) when the other
+	<!-- Capped width, and on the one-row bar it gives way first (down to 5rem below xl, 7rem from xl) when the other
 	     controls need the room: a long provider/model name must never push the page wider
 	     than the window. The full list is also on the settings page. -->
 	<select
 		id="llm-provider"
-		class="num h-7 min-w-0 flex-1 truncate border border-line bg-panel/70 px-2 text-2xs text-ink focus-visible:border-accent disabled:opacity-50 lg:w-44 lg:min-w-28 lg:flex-initial xl:w-56"
+		class="num h-7 min-w-0 flex-1 truncate border border-line bg-panel/70 px-2 text-2xs text-ink focus-visible:border-accent disabled:opacity-50 lg:w-44 lg:min-w-20 lg:flex-initial xl:w-56 xl:min-w-28"
 		disabled={providers.length === 0 || chat.pending}
 		value={provider.selected ?? ''}
 		onchange={(e) => void provider.select(e.currentTarget.value)}
