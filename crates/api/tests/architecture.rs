@@ -333,8 +333,11 @@ async fn the_learning_review_sends_statistics_only_and_checks_the_answer() {
         "{:?}",
         llm.requests.lock().unwrap().last().unwrap().messages
     );
-    for secret in ["EURUSD", "XAUUSD", "login", "balance"] {
-        assert!(!sent.contains(secret), "{secret} was sent: {sent}");
+    for word in ["EURUSD", "XAUUSD", "login", "balance"] {
+        assert!(
+            !sent.contains(word),
+            "a forbidden word was sent to the model"
+        );
     }
     assert!(
         audit_kinds(&app)
@@ -541,7 +544,7 @@ async fn friday_never_sees_the_master_account_number_when_pilot_is_refused() {
     let sent = format!("{:?}", requests.last().unwrap().messages);
     assert!(sent.contains("different account"), "{sent}");
     for digits in ["7904", "53107904", "2222", "11112222"] {
-        assert!(!sent.contains(digits), "{digits} reached the model: {sent}");
+        assert!(!sent.contains(digits), "account digits reached the model");
     }
 }
 

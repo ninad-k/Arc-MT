@@ -71,8 +71,10 @@
 	});
 
 	async function scan() {
+		const before = decisionId;
 		const id = await architecture.scan();
-		if (id && tab === 'decisions') go('decisions', id);
+		// Open the new decision only if the trader did not pick another one while it ran.
+		if (id && tab === 'decisions' && decisionId === before) go('decisions', id);
 	}
 
 	const map = $derived(architecture.map);

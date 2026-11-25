@@ -163,8 +163,9 @@ class ArchitectureStore {
 		this.scanNote = null;
 		try {
 			const res = await api.architectureScan();
-			this.scanNote = `Scan done: ${res.ids.length} new ${res.ids.length === 1 ? 'decision' : 'decisions'}.`;
 			await Promise.all([this.loadPipeline(), this.loadDecisions()]);
+			// Shown once the lists hold the new decisions, so "done" means done.
+			this.scanNote = `Scan done: ${res.ids.length} new ${res.ids.length === 1 ? 'decision' : 'decisions'}.`;
 			return res.ids[0] ?? null;
 		} catch (e) {
 			this.scanError = describeError(toApiError(e));
