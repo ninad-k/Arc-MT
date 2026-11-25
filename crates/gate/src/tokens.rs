@@ -328,6 +328,11 @@ impl TokenStore {
         self.lock().revoke_all();
     }
 
+    /// Whether this store issued `token` (in any state). Used to find which venue holds it.
+    pub fn contains(&self, token: &str) -> bool {
+        self.lock().tokens.contains_key(token)
+    }
+
     /// Remove entries older than a few minutes. Call periodically.
     ///
     /// An entry is dropped once `now_ms` is at least five minutes past its expiry,

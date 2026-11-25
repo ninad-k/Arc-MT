@@ -8,6 +8,7 @@
 //! WebSocket event feed, the voice routes and, when configured, TLS.
 
 pub mod agent;
+pub mod alpaca_venue;
 pub mod assistant;
 pub mod assistant_routes;
 pub mod audit;
@@ -45,6 +46,7 @@ pub mod symbols_routes;
 pub mod tools;
 pub mod trading;
 pub mod users;
+pub mod venue;
 pub mod voice;
 pub mod ws;
 

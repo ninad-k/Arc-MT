@@ -559,6 +559,8 @@ pub struct ToolRegistry {
     /// Spoken alias -> canonical name, for the intent parser.
     intent_aliases: Arc<HashMap<String, String>>,
     trading: Option<Arc<Trading>>,
+    /// Picks MT5 or Alpaca for each proposal (spec-alpaca).
+    router: Option<Arc<crate::venue::VenueRouter>>,
     market: Option<Arc<MarketService>>,
     notes: Option<Arc<NotesService>>,
 }
@@ -588,6 +590,7 @@ impl ToolRegistry {
             trading: None,
             market: None,
             notes: None,
+            router: None,
         }
     }
 
@@ -651,6 +654,29 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_router(mut self, router: Arc<crate::venue::VenueRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// The name a symbol trades under: an Alpaca symbol is its plain ticker (`NVDA`), anything else
+    /// the MT5 broker's name from the symbol map.
+    pub fn resolve_symbol(&self, raw: &str) -> Option<String> {
+        if let Some(router) = &self.router {
+            let canonical = self
+                .resolver
+                .canonical(raw)
+                .unwrap_or_else(|| raw.trim().to_ascii_uppercase());
+            if router.is_alpaca_symbol(&canonical) {
+                return Some(canonical.to_ascii_uppercase());
+            }
+            if router.is_alpaca_symbol(raw) {
+                return Some(raw.trim().to_ascii_uppercase());
+            }
+        }
+        self.resolver.resolve(raw)
+    }
+
     /// The same tools with another symbol resolver: a user's turn resolves names with the
     /// user's own aliases merged over the configured ones. Cheap; limits, tokens and the
     /// bridge are shared.
@@ -676,7 +702,7 @@ impl ToolRegistry {
     pub fn parse_intent(&self, text: &str) -> Intent {
         let mut parsed = intent::parse(text, &self.intent_aliases);
         let resolve = |s: &mut Option<String>| {
-            *s = s.take().and_then(|name| self.resolver.resolve(&name));
+            *s = s.take().and_then(|name| self.resolve_symbol(&name));
         };
         match &mut parsed {
             Intent::Order(f) => resolve(&mut f.symbol),
@@ -817,6 +843,11 @@ impl ToolRegistry {
             persona: ctx.persona.clone(),
             // Chat orders give a volume; sizing by risk from chat is not wired up yet.
             risk_percent: None,
+        };
+        // MT5 or Alpaca, by the symbol or ticket the proposal names (spec-alpaca).
+        let trading = match &self.router {
+            Some(router) => router.for_action(&request.action).await,
+            None => trading,
         };
         match trading.propose(request).await {
             Ok(preview) => ToolOutcome {
@@ -976,7 +1007,7 @@ impl ToolRegistry {
     }
 
     fn symbol(&self, raw: &str) -> Result<String, String> {
-        self.resolver.resolve(raw).ok_or_else(|| {
+        self.resolve_symbol(raw).ok_or_else(|| {
             format!("'{raw}' is not a usable symbol name. Ask the user which instrument they mean.")
         })
     }

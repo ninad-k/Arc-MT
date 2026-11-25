@@ -31,6 +31,7 @@ async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15.7"
+jarvis-alpaca = { version = "0.1.0", path = "../alpaca" }
 jarvis-bridge-client = { version = "0.1.0", path = "../bridge-client" }
 jarvis-desk = { version = "0.1.0", path = "../desk" }
 jarvis-gate = { version = "0.1.0", path = "../gate" }

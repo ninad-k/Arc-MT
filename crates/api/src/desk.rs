@@ -99,6 +99,8 @@ pub struct DeskParts {
     pub bridge: BridgeClient,
     pub market: Option<Arc<MarketService>>,
     pub trading: Arc<Trading>,
+    /// MT5 or Alpaca, by symbol (spec-alpaca).
+    pub router: Arc<crate::venue::VenueRouter>,
     pub finnhub: Option<FinnhubData>,
     pub egress: Arc<EgressLog>,
     pub spend: Arc<SpendMeter>,
@@ -956,6 +958,15 @@ impl Desk {
     // -----------------------------------------------------------------------------------------
 
     fn resolve(&self, user: &DeskUser, raw: &str) -> Result<(String, String), String> {
+        // An Alpaca symbol trades under its plain ticker.
+        let canonical = user
+            .resolver
+            .canonical(raw)
+            .unwrap_or_else(|| raw.trim().to_ascii_uppercase());
+        if self.parts.router.is_alpaca_symbol(&canonical) {
+            let ticker = canonical.to_ascii_uppercase();
+            return Ok((ticker.clone(), ticker));
+        }
         let broker = user
             .resolver
             .resolve(raw)
@@ -1444,7 +1455,8 @@ impl Desk {
         target: Option<f64>,
         risk_percent: Option<f64>,
     ) -> Result<PlanRecord, String> {
-        let bridge = &self.parts.bridge;
+        // Alpaca symbols are priced, specified and sized on the Alpaca account.
+        let bridge = self.reads_for(canonical);
         let price = bridge
             .get_price(broker)
             .await
@@ -1508,16 +1520,26 @@ impl Desk {
         &self,
         canonical: &str,
     ) -> Result<jarvis_desk::sentinel::Context, String> {
-        let open_desk = match self.parts.bridge.get_positions(None).await {
-            Ok(p) => {
-                let tickets = lock(&self.desk_tickets);
-                p.positions
-                    .iter()
-                    .filter(|pos| tickets.contains(&pos.ticket))
-                    .count() as u32
+        // Open Desk positions on every venue.
+        let mut open_desk = 0u32;
+        let mut venues: Vec<Arc<dyn crate::venue::BrokerReads>> =
+            vec![Arc::new(self.parts.bridge.clone())];
+        if let Some(a) = self.parts.router.alpaca() {
+            venues.push(a.venue.clone());
+        }
+        for reads in venues {
+            match reads.get_positions(None).await {
+                Ok(p) => {
+                    let tickets = lock(&self.desk_tickets);
+                    open_desk += p
+                        .positions
+                        .iter()
+                        .filter(|pos| tickets.contains(&pos.ticket))
+                        .count() as u32;
+                }
+                Err(e) => return Err(format!("positions: {e}")),
             }
-            Err(e) => return Err(format!("positions: {e}")),
-        };
+        }
         let session = self.exchange.status(Utc::now());
         Ok(jarvis_desk::sentinel::Context {
             open_desk_positions: open_desk,
@@ -1528,10 +1550,21 @@ impl Desk {
         })
     }
 
+    /// Where a symbol's quotes, specs and account come from: Alpaca for Alpaca symbols, else MT5.
+    fn reads_for(&self, canonical: &str) -> Arc<dyn crate::venue::BrokerReads> {
+        match self.parts.router.alpaca() {
+            Some(a) if self.parts.router.is_alpaca_symbol(canonical) => a.venue.clone(),
+            _ => Arc::new(self.parts.bridge.clone()),
+        }
+    }
+
     /// Whether a symbol trades only in the US equity session: it is in `[desk] universe`, or the
     /// instrument catalog is loaded and the symbol is none of its FX, metal, index, energy or
     /// crypto instruments (so, a stock). Without a catalog only the universe counts.
     fn trades_in_us_session(&self, canonical: &str) -> bool {
+        if self.parts.router.is_alpaca_symbol(canonical) {
+            return true;
+        }
         if self
             .parts
             .config
@@ -1598,10 +1631,11 @@ impl Desk {
             sl: p.stop,
             tp: p.target,
         });
-        let _ = self.parts.trading.broker().observe().await;
-        let preview = match self
-            .parts
-            .trading
+        let trading = self.parts.router.for_action(&action).await.clone();
+        if trading.venue() == crate::venue::VenueKind::Mt5 {
+            let _ = trading.broker().observe().await;
+        }
+        let preview = match trading
             .propose(ProposeRequest {
                 action,
                 session,
@@ -1620,7 +1654,7 @@ impl Desk {
             }
         };
         if preview.total_volume > p.volume + 1e-9 {
-            let _ = self.parts.trading.cancel(&preview.token).await;
+            let _ = trading.cancel(&preview.token).await;
             self.approvals.restore(plan_id);
             let err = PilotError::Oversized {
                 approved: p.volume,

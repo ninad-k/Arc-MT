@@ -77,6 +77,9 @@ pub struct Config {
     /// `[desk]`: Desk mode, the nine-agent Nimbus Desk (spec-nimbus-desk).
     #[serde(default)]
     pub desk: DeskConfig,
+    /// `[alpaca]`: US stocks on an Alpaca paper account, a second venue (spec-alpaca).
+    #[serde(default)]
+    pub alpaca: AlpacaSection,
 }
 
 /// `[assistant]` (spec-assistant-mode). On by default; it needs the provider named here to be
@@ -419,6 +422,158 @@ impl DeskConfig {
         }
         Self::dates(&self.fomc_dates, "fomc_dates")?;
         Self::dates(&self.holidays, "holidays")?;
+        Ok(())
+    }
+}
+
+/// `[alpaca]` (spec-alpaca, ADR-0024): US stocks on an Alpaca **paper** account, as a second venue
+/// next to MT5. On by default; without the keys it reports itself off and sends nothing.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlpacaSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Only `"paper"` is accepted; live Alpaca needs its own ADR.
+    #[serde(default = "default_alpaca_mode")]
+    pub mode: String,
+    /// Environment variables that hold the trading URL and the keys.
+    #[serde(default = "default_alpaca_url_env")]
+    pub trading_url_env: String,
+    #[serde(default = "default_alpaca_key_env")]
+    pub key_id_env: String,
+    #[serde(default = "default_alpaca_secret_env")]
+    pub secret_key_env: String,
+    /// Used when `trading_url_env` is not set.
+    #[serde(default = "default_alpaca_trading_url")]
+    pub trading_url: String,
+    #[serde(default = "default_alpaca_data_url")]
+    pub data_url: String,
+    /// `iex` (free) or `sip` (subscription).
+    #[serde(default = "default_alpaca_feed")]
+    pub feed: String,
+    /// US stocks that trade on Alpaca (canonical names, e.g. `NVDA`).
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    /// Also send `[desk] universe` to Alpaca.
+    #[serde(default = "default_true")]
+    pub include_desk_universe: bool,
+    /// Allow orders outside the regular session. Off: no Alpaca order while the market is closed.
+    #[serde(default)]
+    pub extended_hours: bool,
+    /// Limits for Alpaca orders (the `[limits]` section stays MT5's).
+    #[serde(default = "default_alpaca_max_shares")]
+    pub max_shares: f64,
+    #[serde(default = "default_alpaca_max_notional")]
+    pub max_notional_usd: f64,
+    #[serde(default = "default_alpaca_max_positions")]
+    pub max_positions: u32,
+    #[serde(default = "default_alpaca_max_daily_loss")]
+    pub max_daily_loss_usd: f64,
+    #[serde(default = "default_alpaca_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_alpaca_mode() -> String {
+    "paper".to_owned()
+}
+fn default_alpaca_url_env() -> String {
+    "ALPACA_TRADING_URL".to_owned()
+}
+fn default_alpaca_key_env() -> String {
+    "ALPACA_KEY_ID".to_owned()
+}
+fn default_alpaca_secret_env() -> String {
+    "ALPACA_SECRET_KEY".to_owned()
+}
+fn default_alpaca_trading_url() -> String {
+    jarvis_alpaca::DEFAULT_TRADING_URL.to_owned()
+}
+fn default_alpaca_data_url() -> String {
+    jarvis_alpaca::DEFAULT_DATA_URL.to_owned()
+}
+fn default_alpaca_feed() -> String {
+    "iex".to_owned()
+}
+fn default_alpaca_max_shares() -> f64 {
+    100.0
+}
+fn default_alpaca_max_notional() -> f64 {
+    10_000.0
+}
+fn default_alpaca_max_positions() -> u32 {
+    5
+}
+fn default_alpaca_max_daily_loss() -> f64 {
+    500.0
+}
+fn default_alpaca_timeout() -> u64 {
+    10
+}
+
+impl Default for AlpacaSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: default_alpaca_mode(),
+            trading_url_env: default_alpaca_url_env(),
+            key_id_env: default_alpaca_key_env(),
+            secret_key_env: default_alpaca_secret_env(),
+            trading_url: default_alpaca_trading_url(),
+            data_url: default_alpaca_data_url(),
+            feed: default_alpaca_feed(),
+            symbols: Vec::new(),
+            include_desk_universe: true,
+            extended_hours: false,
+            max_shares: default_alpaca_max_shares(),
+            max_notional_usd: default_alpaca_max_notional(),
+            max_positions: default_alpaca_max_positions(),
+            max_daily_loss_usd: default_alpaca_max_daily_loss(),
+            timeout_secs: default_alpaca_timeout(),
+        }
+    }
+}
+
+impl AlpacaSection {
+    /// The gate limits of the Alpaca venue. `allowed_symbols` are the Alpaca symbols.
+    pub fn limits(&self, symbols: &[String]) -> Limits {
+        Limits {
+            max_lot: self.max_shares,
+            max_positions: self.max_positions,
+            max_daily_loss: self.max_daily_loss_usd,
+            allowed_symbols: symbols.to_vec(),
+            trading_hours: None,
+            max_risk_percent: jarvis_gate::DEFAULT_MAX_RISK_PERCENT,
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.mode != "paper" {
+            bail!("alpaca.mode must be \"paper\": live Alpaca trading is not supported");
+        }
+        if !(self.feed == "iex" || self.feed == "sip") {
+            bail!("alpaca.feed must be \"iex\" or \"sip\"");
+        }
+        if !(1.0..=100_000.0).contains(&self.max_shares) || self.max_shares.fract() != 0.0 {
+            bail!("alpaca.max_shares must be a whole number from 1 to 100000");
+        }
+        if !(1.0..=10_000_000.0).contains(&self.max_notional_usd) {
+            bail!("alpaca.max_notional_usd must be between 1 and 10000000");
+        }
+        if !(1..=100).contains(&self.max_positions) {
+            bail!("alpaca.max_positions must be between 1 and 100");
+        }
+        if !(0.0..=10_000_000.0).contains(&self.max_daily_loss_usd) {
+            bail!("alpaca.max_daily_loss_usd must be between 0 and 10000000");
+        }
+        if !(1..=60).contains(&self.timeout_secs) {
+            bail!("alpaca.timeout_secs must be between 1 and 60");
+        }
+        if self.symbols.len() > 200 {
+            bail!("alpaca.symbols holds at most 200 symbols");
+        }
         Ok(())
     }
 }
@@ -1211,6 +1366,7 @@ impl Config {
         self.market.validate()?;
         self.assistant.validate()?;
         self.desk.validate()?;
+        self.alpaca.validate()?;
         Ok(())
     }
 

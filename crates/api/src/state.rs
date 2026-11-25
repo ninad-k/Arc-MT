@@ -68,6 +68,8 @@ pub struct Overrides {
     pub news: Option<NewsService>,
     /// Desk mode's Finnhub client (default: from the key in `[desk] finnhub_key_env`).
     pub finnhub: Option<jarvis_news::FinnhubData>,
+    /// The Alpaca client (default: from the URL and keys named in `[alpaca]`).
+    pub alpaca: Option<jarvis_alpaca::AlpacaClient>,
 }
 
 /// A configured LLM provider that is either ready or missing something (usually an API key).
@@ -274,6 +276,9 @@ struct Inner {
     /// Assistant mode; `None` when `[assistant] enabled = false`.
     assistant: Option<Arc<crate::assistant::Assistant>>,
     desk: Option<Arc<crate::desk::Desk>>,
+    router: Arc<crate::venue::VenueRouter>,
+    /// Why Alpaca is off (`None` when it is on).
+    alpaca_off: Option<String>,
 }
 
 /// The window of the per-session request budgets.
@@ -366,15 +371,20 @@ impl AppState {
             config.server.transcribe_rate_limit_per_minute,
         );
         let mode = Arc::new(ModeMonitor::new(config.mode));
+        // One kill switch for every venue (clones share their state).
+        let kill_switch = KillSwitch::new(config.trading.kill_switch_engaged);
         let trading = Trading::new(TradingParts {
             bridge: bridge.clone(),
+            reads: None,
+            venue: crate::venue::VenueKind::Mt5,
+            max_notional: None,
             write_sink: overrides.write_sink,
             clock: clock.clone(),
             mode: mode.clone(),
             audit: audit.clone(),
             limits: config.effective_limits(),
             config: config.trading.clone(),
-            kill_switch: KillSwitch::new(config.trading.kill_switch_engaged),
+            kill_switch: kill_switch.clone(),
             time: time.clone(),
             events: events.clone(),
             broker: broker.clone(),
@@ -395,8 +405,29 @@ impl AppState {
                 config: config.market.clone(),
             })
         });
+        // Alpaca (spec-alpaca): a second Trading instance on the same gate, kill switch, audit and
+        // events, with its own limits and tokens. Off, with the reason, unless the keys are set and
+        // the URL is Alpaca paper.
+        let (alpaca_route, alpaca_off) = build_alpaca(
+            &config,
+            overrides.alpaca,
+            AlpacaWiring {
+                bridge: &bridge,
+                audit: &audit,
+                kill_switch: &kill_switch,
+                time: &time,
+                events: &events,
+                broker: &broker,
+                egress: &egress,
+            },
+        );
+        let router = Arc::new(crate::venue::VenueRouter::new(
+            trading.clone(),
+            alpaca_route,
+        ));
         let mut tools = ToolRegistry::new(bridge.clone(), resolver.clone(), clock.clone())
-            .with_trading(trading.clone());
+            .with_trading(trading.clone())
+            .with_router(router.clone());
         if let Some(market) = &market {
             tools = tools.with_market(market.clone());
         }
@@ -445,6 +476,7 @@ impl AppState {
                 bridge: bridge.clone(),
                 market: market.clone(),
                 trading: trading.clone(),
+                router: router.clone(),
                 finnhub,
                 egress: egress.clone(),
                 spend: Arc::new(crate::spend::SpendMeter::new(
@@ -485,6 +517,8 @@ impl AppState {
             notes,
             assistant,
             desk,
+            router,
+            alpaca_off,
         }))
     }
 
@@ -611,6 +645,14 @@ impl AppState {
     }
     pub fn trading(&self) -> &Arc<Trading> {
         &self.0.trading
+    }
+    /// Picks the venue's trading instance for a proposal, token or ticket (spec-alpaca).
+    pub fn router(&self) -> &Arc<crate::venue::VenueRouter> {
+        &self.0.router
+    }
+    /// Why Alpaca is off; `None` when it is on.
+    pub fn alpaca_off(&self) -> Option<&str> {
+        self.0.alpaca_off.as_deref()
     }
     /// Market views, the calendar and news; `None` when they are turned off.
     pub fn market(&self) -> Option<&Arc<MarketService>> {
@@ -1110,6 +1152,120 @@ pub fn news_from_config(
             NewsService::disabled()
         }
     }
+}
+
+/// What the Alpaca trading instance shares with the MT5 one.
+struct AlpacaWiring<'a> {
+    bridge: &'a BridgeClient,
+    audit: &'a Audit,
+    kill_switch: &'a KillSwitch,
+    time: &'a Arc<dyn TimeSource>,
+    events: &'a EventBus,
+    broker: &'a Arc<BrokerService>,
+    egress: &'a Arc<EgressLog>,
+}
+
+/// The Alpaca venue and its trading instance, or why there is none.
+fn build_alpaca(
+    config: &Config,
+    client: Option<jarvis_alpaca::AlpacaClient>,
+    w: AlpacaWiring<'_>,
+) -> (Option<crate::venue::AlpacaRoute>, Option<String>) {
+    let a = &config.alpaca;
+    if !a.enabled {
+        return (
+            None,
+            Some("Alpaca is turned off ([alpaca] enabled = false)".to_owned()),
+        );
+    }
+    let client = match client {
+        Some(c) => c,
+        None => {
+            let env = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            };
+            let (Some(key_id), Some(secret_key)) = (env(&a.key_id_env), env(&a.secret_key_env))
+            else {
+                return (
+                    None,
+                    Some(format!(
+                        "Alpaca keys are not set ({} and {})",
+                        a.key_id_env, a.secret_key_env
+                    )),
+                );
+            };
+            let cfg = jarvis_alpaca::AlpacaConfig {
+                trading_url: env(&a.trading_url_env).unwrap_or_else(|| a.trading_url.clone()),
+                data_url: a.data_url.clone(),
+                key_id,
+                secret_key,
+                feed: a.feed.clone(),
+                timeout: Duration::from_secs(a.timeout_secs),
+            };
+            match jarvis_alpaca::AlpacaClient::new(&cfg) {
+                Ok(c) => c,
+                Err(e) => return (None, Some(e.to_string())),
+            }
+        }
+    };
+    if !client.is_paper() {
+        tracing::warn!("Alpaca is off: the trading URL is not the paper host");
+        return (
+            None,
+            Some("the Alpaca trading URL is not paper-api.alpaca.markets; only paper trading is allowed".to_owned()),
+        );
+    }
+    let mut symbols: std::collections::BTreeSet<String> = a
+        .symbols
+        .iter()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if a.include_desk_universe && config.desk.enabled {
+        symbols.extend(
+            config
+                .desk
+                .universe
+                .iter()
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    let venue = Arc::new(crate::alpaca_venue::AlpacaVenue::new(
+        client,
+        w.egress.clone(),
+        a.extended_hours,
+        a.timeout_secs * 1000,
+    ));
+    let list: Vec<String> = symbols.iter().cloned().collect();
+    let trading = Trading::new(TradingParts {
+        bridge: w.bridge.clone(),
+        reads: Some(venue.clone()),
+        venue: crate::venue::VenueKind::Alpaca,
+        max_notional: Some(a.max_notional_usd),
+        write_sink: Some(venue.clone()),
+        clock: ServerClock::default(),
+        // Paper only: the venue reports a demo account, so this monitor never sees a live one.
+        mode: Arc::new(ModeMonitor::new(crate::config::Mode::Demo)),
+        audit: w.audit.clone(),
+        limits: a.limits(&list),
+        config: config.trading.clone(),
+        kill_switch: w.kill_switch.clone(),
+        time: w.time.clone(),
+        events: w.events.clone(),
+        broker: w.broker.clone(),
+    });
+    (
+        Some(crate::venue::AlpacaRoute {
+            trading,
+            venue,
+            symbols,
+        }),
+        None,
+    )
 }
 
 #[cfg(test)]

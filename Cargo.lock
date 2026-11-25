@@ -1561,6 +1561,7 @@ dependencies = [
  "hkdf 0.13.0",
  "http-body-util",
  "hyper-util",
+ "jarvis-alpaca",
  "jarvis-bridge-client",
  "jarvis-desk",
  "jarvis-gate",

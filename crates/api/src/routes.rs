@@ -1106,7 +1106,11 @@ async fn confirm(
     parts: Parts,
 ) -> Result<Json<ConfirmResponse>, ApiError> {
     let key = client_key(&parts);
-    let response = state.trading().confirm(&token, &key).await?;
+    let response = state
+        .router()
+        .for_token(&token)
+        .confirm(&token, &key)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1114,7 +1118,7 @@ async fn cancel(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state.trading().cancel(&token).await?;
+    state.router().for_token(&token).cancel(&token).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1122,7 +1126,7 @@ async fn readback(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let expires_at_ms = state.trading().readback_finished(&token)?;
+    let expires_at_ms = state.router().for_token(&token).readback_finished(&token)?;
     Ok(Json(json!({ "expires_at_ms": expires_at_ms })))
 }
 
@@ -1157,8 +1161,9 @@ pub(crate) async fn propose_sized_from_ui(
 ) -> Result<Json<PreviewDto>, ApiError> {
     // The audit rows of a button press carry the persona the user has active.
     let settings = state.user_settings(session).await;
-    let preview = state
-        .trading()
+    // MT5 or Alpaca, by the symbol or ticket the action names (spec-alpaca).
+    let trading = state.router().for_action(&action).await.clone();
+    let preview = trading
         .propose(ProposeRequest {
             action,
             session: None,
@@ -1297,7 +1302,12 @@ async fn killswitch_set(
             .filter(|r| !r.is_empty())
             .unwrap_or("manual");
         let reason: String = reason.chars().take(200).collect();
-        state.trading().engage_kill_switch(&reason).await
+        let engaged = state.trading().engage_kill_switch(&reason).await;
+        // The switch is shared; the other venues' live previews are revoked too.
+        for t in state.router().all().into_iter().skip(1) {
+            t.revoke_tokens();
+        }
+        engaged
     } else {
         state
             .release_guard()
